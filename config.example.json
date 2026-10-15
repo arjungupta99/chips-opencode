@@ -1,0 +1,10 @@
+{
+  "name": "OpenCode",
+  "url": "http://127.0.0.1:4096",
+  "passwordEnv": "OPENCODE_PASSWORD",
+  "directory": "~/Work/my-project",
+  "agents": [
+    { "name": "OpenCode", "agent": "build" },
+    { "name": "Planner", "agent": "plan", "model": "anthropic/claude-sonnet-5-5" }
+  ]
+}
