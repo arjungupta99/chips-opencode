@@ -20,9 +20,9 @@
  *   `queue`, and interrupt-then-prompt.
  */
 
-import type { Agent, ApprovalInput, Chips, Decision, Run, Speaker } from "@chips/harness";
-import { promptFor } from "@chips/harness";
-import { createIdGenerator, type MessageNew, type StepKind } from "@chips/protocol";
+import type { Agent, ApprovalInput, Chips, Decision, Run, Speaker } from "@chipschat/harness";
+import { promptFor } from "@chipschat/harness";
+import { createIdGenerator, type MessageNew, type StepKind } from "@chipschat/protocol";
 import {
   type FormAnswer,
   type ModelRef,
@@ -206,6 +206,11 @@ export class Bridge {
   stop(): void {
     if (this.health !== undefined) clearInterval(this.health);
     this.listening.abort();
+  }
+
+  /** The Main agent, the first registered, once started: who says the harness's first words. */
+  get mainAgentId(): string | undefined {
+    return this.agents[0]?.agentId;
   }
 
   /** The Main agent into the harness's own room, in the place of whichever of ours is there. */

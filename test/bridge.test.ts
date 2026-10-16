@@ -5,8 +5,8 @@
 
 import { strict as assert } from "node:assert";
 import { afterEach, describe, it } from "node:test";
-import { type FakeChips, type StoredEvent, startFakeChips } from "@chips/conformance";
-import { type Chips, connect, type Decision } from "@chips/harness";
+import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
+import { type Chips, connect, type Decision } from "@chipschat/harness";
 import { Bridge, type BridgeState, cardOf, decisionOf, keyOf, questionOf } from "../src/bridge.ts";
 import { OpenCodeClient } from "../src/opencode.ts";
 import { type FakeOpenCode, startFakeOpenCode } from "./fake-opencode.ts";
