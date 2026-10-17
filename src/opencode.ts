@@ -97,27 +97,41 @@ export class OpenCodeClient {
   }
 
   async agents(): Promise<AgentInfo[]> {
-    const listed = await this.call("GET", `/api/agent${this.where()}`);
-    return Array.isArray(listed["data"]) ? (listed["data"] as AgentInfo[]) : [];
+    return (await this.catalogue("agent")) as AgentInfo[];
   }
 
   async models(): Promise<ModelInfo[]> {
-    const listed = await this.call("GET", `/api/model${this.where()}`);
-    return Array.isArray(listed["data"]) ? (listed["data"] as ModelInfo[]) : [];
+    return (await this.catalogue("model")) as ModelInfo[];
   }
 
-  /** A session for a room, of one agent, in the project. */
+  /**
+   * A project's catalogue. OpenCode 2.0 answers the first ask for a project it hasn't loaded with
+   * an empty list, and the next with the whole one: a server always has its `build` agent, so an
+   * empty list is asked again, a few times, before it is believed.
+   */
+  private async catalogue(of: "agent" | "model"): Promise<unknown[]> {
+    for (let tries = 1; ; tries += 1) {
+      const listed = await this.call("GET", `/api/${of}${this.where()}`);
+      const data = Array.isArray(listed["data"]) ? listed["data"] : [];
+      if (data.length > 0 || tries === 4) return data;
+      await new Promise((resolve) => setTimeout(resolve, 100 * tries));
+    }
+  }
+
+  /** A session for a room, of one agent, in `directory`, else the project. */
   async newSession(input: {
     readonly title: string;
     readonly agent: string;
     readonly model?: ModelRef | undefined;
+    readonly directory?: string | undefined;
     readonly metadata?: Readonly<Record<string, unknown>> | undefined;
   }): Promise<string> {
+    const directory = input.directory ?? this.address.directory;
     const made = await this.call("POST", "/api/session", {
       title: input.title,
       agent: input.agent,
       ...(input.model === undefined ? {} : { model: input.model }),
-      ...(this.address.directory === undefined ? {} : { location: { directory: this.address.directory } }),
+      ...(directory === undefined ? {} : { location: { directory } }),
       ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
     });
     const id = (made["data"] as Record<string, unknown> | undefined)?.["id"];

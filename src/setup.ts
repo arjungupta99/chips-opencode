@@ -17,7 +17,10 @@ export interface Config {
   readonly url: string;
   readonly password: string;
   readonly passwordEnv: string;
+  /** One project every session works in: a repository they share. Each agent has its own folder when absent. */
   readonly directory: string | undefined;
+  /** Where each agent's own folder is made, without a `directory`. */
+  readonly folders: string;
   readonly agents: readonly AgentConfig[];
 }
 
@@ -58,6 +61,7 @@ export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
     password,
     passwordEnv,
     directory: typeof raw["directory"] === "string" ? resolve(home(raw["directory"])) : undefined,
+    folders: resolve(home(typeof raw["folders"] === "string" ? raw["folders"] : "~/chips-opencode/agents")),
     agents,
   };
 }

@@ -31,6 +31,8 @@ interface FakeSession {
   readonly agent: string;
   readonly parentID?: string;
   readonly inbox: Item[];
+  /** The folder it was made to work in, when it was given one. */
+  readonly directory?: string;
   busy: boolean;
   interrupted: boolean;
   outcome?: string;
@@ -73,7 +75,11 @@ export interface FakeOpenCode {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function startFakeOpenCode(options: { askFirst?: boolean; directory?: string } = {}): Promise<FakeOpenCode> {
+export async function startFakeOpenCode(
+  options: { askFirst?: boolean; directory?: string; cold?: boolean } = {},
+): Promise<FakeOpenCode> {
+  /** With `cold`, its first catalogue answers are empty, as OpenCode 2.0's are for a project it hasn't loaded. */
+  let cold = options.cold === true ? 2 : 0;
   /** The project its sessions work in, as OpenCode says it. */
   const directory = options.directory ?? "/work";
   const password = "opencode-test-password";
@@ -304,6 +310,10 @@ export async function startFakeOpenCode(options: { askFirst?: boolean; directory
       if (request.headers.authorization !== auth) return json(response, 401, { _tag: "UnauthorizedError", message: "Authentication required" });
       if (method === "GET" && path === "/api/info") return json(response, 200, { version: "2.0.29", pid: 1, urls: [], paths: { tmp: "/tmp" } });
       if (method === "GET" && path === "/api/agent") {
+        if (cold > 0) {
+          cold -= 1;
+          return json(response, 200, { location: { directory: "/work" }, data: [] });
+        }
         return json(response, 200, {
           location: { directory: "/work" },
           data: [
@@ -331,7 +341,16 @@ export async function startFakeOpenCode(options: { askFirst?: boolean; directory
       if (method === "POST" && path === "/api/session") {
         const body = await bodyOf(request);
         const id = next("ses");
-        sessions.set(id, { id, agent: String(body["agent"] ?? "build"), inbox: [], busy: false, interrupted: false, last: "" });
+        const own = (body["location"] as { directory?: unknown } | undefined)?.directory;
+        sessions.set(id, {
+          id,
+          agent: String(body["agent"] ?? "build"),
+          inbox: [],
+          ...(typeof own === "string" ? { directory: own } : {}),
+          busy: false,
+          interrupted: false,
+          last: "",
+        });
         fake.created.push({ id, agent: body["agent"], model: body["model"], location: body["location"], metadata: body["metadata"] });
         emit("session.created", { sessionID: id, projectID: "prj_1", slug: "room", version: "2.0.29" });
         return json(response, 200, { data: { id, projectID: "prj_1", cost: 0, tokens, time: { created: 0, updated: 0 }, location: { directory: "/work" } } });
@@ -342,7 +361,7 @@ export async function startFakeOpenCode(options: { askFirst?: boolean; directory
       if (session === undefined) return missing(response, route[1] ?? "");
       const rest = route[2];
       if (method === "GET" && rest === undefined) {
-        return json(response, 200, { data: { id: session.id, outcome: session.outcome, location: { directory } } });
+        return json(response, 200, { data: { id: session.id, outcome: session.outcome, location: { directory: session.directory ?? directory } } });
       }
       if (method === "GET" && rest === "inbox") return json(response, 200, { data: session.inbox.map((item) => ({ id: item.id })) });
       if (method === "GET" && rest === "message") {

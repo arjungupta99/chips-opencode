@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
 import { type Chips, connect, type Decision } from "@chipschat/harness";
-import { Bridge, type BridgeState, cardOf, decisionOf, keyOf, questionOf, spoken } from "../src/bridge.ts";
+import { Bridge, type BridgeState, cardOf, decisionOf, freeFolder, keyOf, questionOf, spoken } from "../src/bridge.ts";
 import { OpenCodeClient } from "../src/opencode.ts";
 import { type FakeOpenCode, startFakeOpenCode, THOUGHTFUL } from "./fake-opencode.ts";
 
@@ -31,7 +31,7 @@ afterEach(async () => {
 const AGENT = { name: "OpenCode", agent: "build" } as const;
 
 async function rig(
-  options: { state?: BridgeState; model?: string; directory?: string; chips?: FakeChips; folder?: string } = {},
+  options: { state?: BridgeState; model?: string; directory?: string; chips?: FakeChips; folder?: string; folders?: string } = {},
 ): Promise<Rig> {
   const chips = options.chips ?? (await startFakeChips({ capabilities: ["agents"] }));
   if (options.chips === undefined) open.push(() => chips.close());
@@ -48,6 +48,7 @@ async function rig(
     saveState: () => undefined,
     healthEveryMs: 50,
     reconnectMs: 50,
+    ...(options.folders === undefined ? {} : { folders: options.folders }),
   });
   open.push(async () => {
     bridge.stop();
@@ -165,6 +166,34 @@ describe("the files an answer names", () => {
       ["page.html"],
     );
     assert.match(opencode.prompts[0]?.text ?? "", /MEDIA:<path> on a line of its own/, "it was told how");
+  });
+
+  it("makes each agent's sessions in a folder of its own, named after it, and sends its files from there", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chips-opencode-folders-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    const { chips, opencode, state } = await rig({ folders: root });
+    const own = join(root, "opencode");
+    await chips.say("hello");
+    await sent(chips, "run.completed");
+    assert.deepEqual(opencode.created[0]?.location, { directory: own });
+    assert.deepEqual(Object.values(state.folders ?? {}), [own]);
+    writeFileSync(join(own, "page.html"), "<p>play</p>");
+    await chips.say("send the page");
+    const words = await chips.waitFor(
+      (event) => (event.type === "message.post" && (event.payload["attachments"] as unknown[] | undefined)?.length ? event : undefined),
+      3000,
+    );
+    assert.deepEqual(
+      (words.payload["attachments"] as { filename: string }[]).map((each) => each.filename),
+      ["page.html"],
+    );
+    assert.equal(opencode.created.length, 1, "the room's one session, in the agent's folder");
+  });
+
+  it("names a folder after its agent, and another after a second agent of that name", () => {
+    assert.equal(freeFolder("/a", "Planner Two", []), "/a/planner-two");
+    assert.equal(freeFolder("/a", "Planner Two", ["/a/planner-two"]), "/a/planner-two-2");
+    assert.equal(freeFolder("/a", "🙂", []), "/a/agent");
   });
 });
 

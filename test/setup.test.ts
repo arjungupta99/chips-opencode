@@ -7,8 +7,9 @@ import { strict as assert } from "node:assert";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it } from "node:test";
-import { OpenCodeError } from "../src/opencode.ts";
+import { OpenCodeClient, OpenCodeError } from "../src/opencode.ts";
 import { checkOpenCode, readConfig, SetupError, STILL_GOOD } from "../src/setup.ts";
+import { startFakeOpenCode } from "./fake-opencode.ts";
 
 const none = join(tmpdir(), "chips-opencode-no-config.json");
 
@@ -38,5 +39,18 @@ describe("before the link is taken up", () => {
     );
     const offered = await checkOpenCode(read, { agents: async () => [{ id: "build" }] as never });
     assert.equal(offered.length, 1);
+  });
+});
+
+describe("OpenCode's catalogues", () => {
+  // Setup audit S12: an empty first answer made every start say "has no agent build: it has ".
+  it("asks again when the first answer for a project it hasn't loaded is empty", async () => {
+    const fake = await startFakeOpenCode({ cold: true });
+    try {
+      const client = new OpenCodeClient({ url: fake.url, password: fake.password });
+      assert.deepEqual((await client.agents()).map((each) => each.id), ["build", "plan"]);
+    } finally {
+      await fake.close();
+    }
   });
 });

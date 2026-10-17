@@ -21,7 +21,7 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | Steps, drawn by kind | `session.tool.called` / `success` / `failed`, by OpenCode's call id |
 | A sub-agent | the `subagent` call as a handoff step; its child session's cost and asks are the run's |
 | The reply | the words of the session's last answer |
-| Files in the reply | each `MEDIA:<path>` line of its own in the answer, taken out of the words and sent from the session's folder, as OpenCode says it (each turn is told how); a file outside it is refused, and the reply says so |
+| Files in the reply | each `MEDIA:<path>` line of its own in the answer, taken out of the words and sent from the session's folder (the agent's own), as OpenCode says it (each turn is told how); a file outside it is refused, and the reply says so |
 | Cost and tokens | each model call's `session.step.ended`: OpenCode's own cost, as a step's share |
 | The context gauge | the last call's tokens against the model's window from `GET /api/model` |
 | An approval card | `permission.asked` → `POST …/permission/{id}/reply`: `always` when a person said always, else `once`; `reject` with their reason for a no. One answered in OpenCode's own apps is settled in Chips (ADR 0079) |
@@ -47,7 +47,7 @@ Not yet:
 
 ## Run it
 
-1. Start OpenCode's server in the project it should work in, with a password:
+1. Start OpenCode's server, anywhere, with a password:
 
    ```
    OPENCODE_PASSWORD=<a long random password> opencode serve
@@ -56,9 +56,14 @@ Not yet:
    It listens on `127.0.0.1:4096`.
 
 2. Optionally, name the agents in `~/.chips-opencode/config.json` (see `config.example.json`).
-   Without a config it is OpenCode's `build` agent, named OpenCode, on `127.0.0.1:4096` in the
-   server's own directory. The password is read from the environment variable `passwordEnv` names
-   (`OPENCODE_PASSWORD` by default), never from the file.
+   Without a config it is OpenCode's `build` agent, named OpenCode, on `127.0.0.1:4096`. The
+   password is read from the environment variable `passwordEnv` names (`OPENCODE_PASSWORD` by
+   default), never from the file.
+
+   Each agent's sessions work in a folder of its own, `~/chips-opencode/agents/<its name>`, made
+   the first time it is spoken to and kept after a rename; `folders` moves them. A `directory`
+   puts every session in that one project instead, a repository the agents share. A session made
+   before an agent had its folder goes on in the server's own directory.
 
 3. Join Chips once, with a link from Chips's gallery (Add an agent → OpenCode), whose card gives
    this line with the link in it:

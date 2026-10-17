@@ -6,11 +6,12 @@
  * The config is JSON, `~/.chips-opencode/config.json` unless a path is given, and may be left out:
  *
  *     { "url": "http://127.0.0.1:4096", "passwordEnv": "OPENCODE_PASSWORD",
- *       "directory": "~/Work/my-project",
+ *       "folders": "~/chips-opencode/agents",
  *       "agents": [{ "name": "OpenCode", "agent": "build" }, { "name": "Planner", "agent": "plan" }] }
  *
- * Without one it is OpenCode's `build` agent, named OpenCode, on `opencode serve`'s own address
- * and directory. The server's password is read from the environment variable `passwordEnv`
+ * Without one it is OpenCode's `build` agent, named OpenCode, on `opencode serve`'s own address.
+ * Each agent's sessions work in a folder of its own under `folders`; a `directory` puts them all
+ * in that one project instead. The server's password is read from the environment variable `passwordEnv`
  * names, never written in the file. What it keeps is beside the config: the SDK's state (cursor,
  * unanswered events, runs not ended) and which session each room is.
  */
@@ -53,7 +54,8 @@ const offered = link !== undefined
       return undefined;
     });
 for (const agent of config.agents) {
-  if (offered !== undefined && !offered.some((each) => each.id === agent.agent)) {
+  // An empty list is OpenCode not having loaded the project yet, not a missing agent (setup audit S12).
+  if (offered !== undefined && offered.length > 0 && !offered.some((each) => each.id === agent.agent)) {
     log(`OpenCode has no agent "${agent.agent}" for ${agent.name}: it has ${offered.map((each) => each.id).join(", ")}`);
   }
 }
@@ -86,6 +88,7 @@ const bridge = new Bridge({
   state,
   saveState: (next) => writeFileSync(statePath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 }),
   log,
+  ...(config.directory === undefined ? { folders: config.folders } : {}),
 });
 await bridge.start();
 log(`answering for ${config.agents.map((agent) => agent.name).join(", ")} through OpenCode at ${config.url}`);

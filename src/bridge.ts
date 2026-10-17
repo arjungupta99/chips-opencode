@@ -20,6 +20,8 @@
  *   `queue`, and interrupt-then-prompt.
  */
 
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import type { Agent, ApprovalInput, Chips, Decision, Run, Speaker } from "@chipschat/harness";
 import { promptFor, sendAnswer } from "@chipschat/harness";
 import { type AgentAsked, createIdGenerator, type MessageNew, type StepKind } from "@chipschat/protocol";
@@ -49,6 +51,8 @@ export interface BridgeState {
    * its Chips id in the place of the key.
    */
   sessions: Record<string, string>;
+  /** Each agent's own folder, by whose sessions they are (`Room.who`), made the first time it is needed. */
+  folders?: Record<string, string>;
 }
 
 export interface BridgeOptions {
@@ -60,10 +64,28 @@ export interface BridgeOptions {
   readonly state: BridgeState;
   readonly saveState: (state: BridgeState) => void;
   readonly log?: ((line: string) => void) | undefined;
+  /**
+   * Where each agent gets a folder of its own, named after it, that its sessions work in. Without
+   * it every session works in the project: the config's `directory`, else the server's own.
+   */
+  readonly folders?: string | undefined;
   /** How often the server is asked whether it is up. */
   readonly healthEveryMs?: number | undefined;
   /** How long after the event stream drops it is opened again, at first. */
   readonly reconnectMs?: number | undefined;
+}
+
+/** A folder under `root` named after an agent, `-2` and on when another agent has that one. */
+export function freeFolder(root: string, name: string, taken: readonly string[]): string {
+  const slug =
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "agent";
+  for (let count = 1; ; count += 1) {
+    const folder = join(root, count === 1 ? slug : `${slug}-${count}`);
+    if (!taken.includes(folder)) return folder;
+  }
 }
 
 /** Ids for the cards asked here, made before the ask so OpenCode's own answer can find its card. */
@@ -434,11 +456,33 @@ export class Bridge {
       title: `Chips room ${spaceId}`,
       agent: agent.config.agent,
       model: agent.model,
+      directory: await this.folderFor({ id, who, agent, spaceId } as Room),
       metadata: { chips_space: spaceId, chips_agent: who },
     });
     state.sessions[id] = made;
     saveState(state);
     return { sessionId: made, given: await this.prompted(made, text) };
+  }
+
+  /**
+   * The folder an agent's new sessions work in, its own: made the first time, named after it, and
+   * kept by whose it is, so a rename doesn't move it. None without `folders`: the project's.
+   */
+  private async folderFor({ who, agent }: Room): Promise<string | undefined> {
+    const { folders: root, state, saveState } = this.options;
+    if (root === undefined) return undefined;
+    let folder = state.folders?.[who];
+    if (folder === undefined) {
+      const name =
+        who === agent.key
+          ? agent.config.name
+          : ((await this.options.chips.agents.list().catch(() => [])).find((each) => each.agentId === who)?.name ?? "agent");
+      folder = freeFolder(root, name, Object.values(state.folders ?? {}));
+      state.folders = { ...state.folders, [who]: folder };
+      saveState(state);
+    }
+    mkdirSync(folder, { recursive: true });
+    return folder;
   }
 
   /** A turn's first words into a session, what it says meanwhile held for the turn. */
