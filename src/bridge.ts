@@ -21,7 +21,7 @@
  */
 
 import type { Agent, ApprovalInput, Chips, Decision, Run, Speaker } from "@chipschat/harness";
-import { promptFor } from "@chipschat/harness";
+import { promptFor, sendAnswer } from "@chipschat/harness";
 import { type AgentAsked, createIdGenerator, type MessageNew, type StepKind } from "@chipschat/protocol";
 import {
   type FormAnswer,
@@ -176,6 +176,8 @@ export class Bridge {
    * may say it took them before it answers that it has them. Heard by the turn once it is.
    */
   private readonly early = new Map<string, OpenCodeEvent[]>();
+  /** Each session's folder, as OpenCode said it, once asked. */
+  private readonly folders = new Map<string, string>();
   /** A sub-agent's child session → the session it works for. */
   private readonly parents = new Map<string, string>();
   /** Each model's context window, by `provider/model`. */
@@ -367,7 +369,7 @@ export class Bridge {
     const { agent, spaceId } = room;
     const speaker = speakerId === undefined ? this.options.chips : this.options.chips.as(speakerId);
     const run = await speaker.runs.start({ spaceId, goal: goalOf(message, agent.config.name) });
-    const text = promptFor(message, speakerId === undefined ? {} : { taker: speakerId });
+    const text = promptFor(message, { ...(speakerId === undefined ? {} : { taker: speakerId }), sendsFiles: true });
     let sessionId: string;
     let given: string;
     try {
@@ -829,11 +831,33 @@ export class Bridge {
       await run.executed(approvalId, "executed", "OpenCode didn't say how it went.").catch(() => undefined);
     }
     turn.allowed.clear();
-    const reply = spoken(turn.recovered ?? lastWordsOf(turn.words)).trim();
-    if (reply !== "") await turn.speaker.post({ spaceId: run.spaceId, runId: run.id, text: reply });
-    const summary = reply === "" ? "Done." : reply.length <= 2000 ? reply : `${reply.slice(0, 1990)}…`;
+    const answer = spoken(turn.recovered ?? lastWordsOf(turn.words)).trim();
+    // The files its `MEDIA:` lines name go with its words, from its session's folder (Chips TT-7).
+    const folder = await this.folderOf(turn.sessionId);
+    const { chips } = this.options;
+    const post = await sendAnswer(answer, {
+      folders: folder === undefined ? [] : [folder],
+      upload: (input) => chips.upload(input),
+    });
+    const reply = post.text;
+    if (reply !== "" || post.uploadIds.length > 0) {
+      await turn.speaker.post({ spaceId: run.spaceId, runId: run.id, text: reply, uploadIds: post.uploadIds });
+    }
+    const said = post.summary;
+    const summary = said === "" ? "Done." : said.length <= 2000 ? said : `${said.slice(0, 1990)}…`;
     await run.complete({ summary });
     this.log(`${agent.config.name} answered in ${run.spaceId}`);
+  }
+
+  /** Where a session works, as OpenCode says: the one folder its answers' files are sent from. */
+  private async folderOf(sessionId: string): Promise<string | undefined> {
+    const known = this.folders.get(sessionId);
+    if (known !== undefined) return known;
+    const session = await this.options.opencode.session(sessionId).catch(() => ({}) as Record<string, unknown>);
+    const location = (session["location"] ?? {}) as Record<string, unknown>;
+    const folder = [session["directory"], location["directory"]].find((each): each is string => typeof each === "string");
+    if (folder !== undefined) this.folders.set(sessionId, folder);
+    return folder;
   }
 
   /** A run that failed, was interrupted, or stopped. */

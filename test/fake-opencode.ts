@@ -73,7 +73,9 @@ export interface FakeOpenCode {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function startFakeOpenCode(options: { askFirst?: boolean } = {}): Promise<FakeOpenCode> {
+export async function startFakeOpenCode(options: { askFirst?: boolean; directory?: string } = {}): Promise<FakeOpenCode> {
+  /** The project its sessions work in, as OpenCode says it. */
+  const directory = options.directory ?? "/work";
   const password = "opencode-test-password";
   const auth = `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`;
   const sessions = new Map<string, FakeSession>();
@@ -197,6 +199,10 @@ export async function startFakeOpenCode(options: { askFirst?: boolean } = {}): P
       );
     }
     if (/\bfail\b/.test(words)) throw new Error("The model refused.");
+    if (/\bsend\b/.test(words)) {
+      // Files named as the Chips SDK tells an agent: one from its folder, one from outside it.
+      return step(session, async (message) => say(session, message, "The page is ready.\n\nMEDIA:page.html\nMEDIA:../secret.txt"));
+    }
     if (/\bslow\b/.test(words)) {
       for (let i = 0; i < 30 && !session.interrupted; i += 1) {
         emit("session.text.delta", { sessionID: session.id, assistantMessageID: "msg_slow", ordinal: 0, delta: "." });
@@ -335,7 +341,9 @@ export async function startFakeOpenCode(options: { askFirst?: boolean } = {}): P
       if (route === null) return json(response, 404, { _tag: "NotFound", message: "no such route" });
       if (session === undefined) return missing(response, route[1] ?? "");
       const rest = route[2];
-      if (method === "GET" && rest === undefined) return json(response, 200, { data: { id: session.id, outcome: session.outcome } });
+      if (method === "GET" && rest === undefined) {
+        return json(response, 200, { data: { id: session.id, outcome: session.outcome, location: { directory } } });
+      }
       if (method === "GET" && rest === "inbox") return json(response, 200, { data: session.inbox.map((item) => ({ id: item.id })) });
       if (method === "GET" && rest === "message") {
         return json(response, 200, { data: [{ type: "assistant", content: [{ type: "text", text: session.last }] }], cursor: {} });

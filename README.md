@@ -21,6 +21,7 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | Steps, drawn by kind | `session.tool.called` / `success` / `failed`, by OpenCode's call id |
 | A sub-agent | the `subagent` call as a handoff step; its child session's cost and asks are the run's |
 | The reply | the words of the session's last answer |
+| Files in the reply | each `MEDIA:<path>` line of its own in the answer, taken out of the words and sent from the session's folder, as OpenCode says it (each turn is told how); a file outside it is refused, and the reply says so |
 | Cost and tokens | each model call's `session.step.ended`: OpenCode's own cost, as a step's share |
 | The context gauge | the last call's tokens against the model's window from `GET /api/model` |
 | An approval card | `permission.asked` → `POST …/permission/{id}/reply`: `always` when a person said always, else `once`; `reject` with their reason for a no. One answered in OpenCode's own apps is settled in Chips (ADR 0079) |

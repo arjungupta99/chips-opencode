@@ -4,6 +4,9 @@
  */
 
 import { strict as assert } from "node:assert";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
 import { type Chips, connect, type Decision } from "@chipschat/harness";
@@ -28,11 +31,11 @@ afterEach(async () => {
 const AGENT = { name: "OpenCode", agent: "build" } as const;
 
 async function rig(
-  options: { state?: BridgeState; model?: string; directory?: string; chips?: FakeChips } = {},
+  options: { state?: BridgeState; model?: string; directory?: string; chips?: FakeChips; folder?: string } = {},
 ): Promise<Rig> {
   const chips = options.chips ?? (await startFakeChips({ capabilities: ["agents"] }));
   if (options.chips === undefined) open.push(() => chips.close());
-  const opencode = await startFakeOpenCode();
+  const opencode = await startFakeOpenCode(options.folder === undefined ? {} : { directory: options.folder });
   open.push(() => opencode.close());
   const client = await connect({ url: chips.address.url, token: chips.address.token });
   const state = options.state ?? { sessions: {} };
@@ -140,6 +143,28 @@ describe("a new agent a person asks for (Chips ADR 0108)", () => {
       [...made].sort(),
     );
     assert.deepEqual(Object.keys(state.sessions).sort(), made.map((id) => `${id}|${room}`).sort());
+  });
+});
+
+// OpenCode's agents answered with a path on this Mac, which no phone opens (Chips TT-7).
+describe("the files an answer names", () => {
+  it("sends each file a MEDIA: line names from its session's folder, and says what it couldn't send", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chips-opencode-files-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    mkdirSync(join(root, "work"));
+    writeFileSync(join(root, "work", "page.html"), "<p>play</p>");
+    writeFileSync(join(root, "secret.txt"), "not OpenCode's");
+    const { chips, opencode } = await rig({ folder: join(root, "work") });
+    await chips.say("send the page");
+    const started = await sent(chips, "run.started");
+    const words = await sent(chips, "message.post", (event) => event.run_id === started.run_id);
+    assert.equal(words.payload["text"], "The page is ready.\n\n(secret.txt was not attached: it is outside the agent's folder.)");
+    const attachments = words.payload["attachments"] as { filename: string }[];
+    assert.deepEqual(
+      attachments.map((each) => each.filename),
+      ["page.html"],
+    );
+    assert.match(opencode.prompts[0]?.text ?? "", /MEDIA:<path> on a line of its own/, "it was told how");
   });
 });
 
