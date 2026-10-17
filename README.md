@@ -78,6 +78,13 @@ Not yet:
    in its room once, which the card waits for. The key Chips gives it is kept, so later starts need
    only the password; a new link from Chips replaces it.
 
+4. To keep it running: `npm run keep` in the place of `npm start`, with the link or without. Joined,
+   it writes a launch agent (`~/Library/LaunchAgents/chat.chips.opencode.plist`; a systemd user
+   unit on Linux) that runs the bridge from login and again whenever it stops, carrying the
+   password in a file only you can read, and ends. Its log is `~/Library/Logs/chips-opencode.log`.
+   `npm run keep -- --stop` stops it and removes the file. Stop a copy started by hand first: two
+   answer twice. `opencode serve` is kept running its own way.
+
 ## Tests
 
 ```

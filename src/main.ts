@@ -14,6 +14,8 @@
  * in that one project instead. The server's password is read from the environment variable `passwordEnv`
  * names, never written in the file. What it keeps is beside the config: the SDK's state (cursor,
  * unanswered events, runs not ended) and which session each room is.
+ *
+ * `npm run keep` is the same, then keeps the bridge running from login (`keep.ts`).
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -21,13 +23,16 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { connect, fileStore, helloOnce, join as joinChips } from "@chipschat/harness";
 import { Bridge, type BridgeState } from "./bridge.js";
+import { keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { OpenCodeClient } from "./opencode.js";
 import { type Config, checkOpenCode, readConfig, SetupError } from "./setup.js";
 
 const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 const link = process.env["CHIPS_JOIN_LINK"] || undefined;
 
-const configPath = resolve(home(process.argv[2] ?? "~/.chips-opencode/config.json"));
+const LABEL = "chat.chips.opencode";
+stopIfAsked(LABEL);
+const configPath = resolve(home(words[0] ?? "~/.chips-opencode/config.json"));
 const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
 const stop = (error: unknown): never => {
   if (!(error instanceof SetupError)) throw error;
@@ -68,6 +73,9 @@ const joined = await joinChips({
   wants: ["agents", "new_agents"],
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
 });
+// Joined, `npm run keep` hands over to a copy kept running, which says the hello. It takes the
+// server's password with it, in a file only its user can read.
+keepIfAsked(LABEL, joined.url, [config.passwordEnv], log);
 
 const state: BridgeState = existsSync(statePath)
   ? (JSON.parse(readFileSync(statePath, "utf8")) as BridgeState)
