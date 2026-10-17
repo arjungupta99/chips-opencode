@@ -829,7 +829,7 @@ export class Bridge {
       await run.executed(approvalId, "executed", "OpenCode didn't say how it went.").catch(() => undefined);
     }
     turn.allowed.clear();
-    const reply = (turn.recovered ?? lastWordsOf(turn.words)).trim();
+    const reply = spoken(turn.recovered ?? lastWordsOf(turn.words)).trim();
     if (reply !== "") await turn.speaker.post({ spaceId: run.spaceId, runId: run.id, text: reply });
     const summary = reply === "" ? "Done." : reply.length <= 2000 ? reply : `${reply.slice(0, 1990)}…`;
     await run.complete({ summary });
@@ -973,6 +973,20 @@ function detailOf(tool: string, input: Readonly<Record<string, unknown>>): strin
 }
 
 /** The words of the newest answer that had any: what came before were its words on the way. */
+/**
+ * An answer's words without the thinking some models write into them. A model that thinks in
+ * `<think>` tags, whose opening tag the prompt has already given it, answers with its thinking, a
+ * `</think>`, and then its answer: big-pickle did (Chips, 17 October 2026), and its draft of a
+ * table, with no line of dashes under the heading, drew in the room as rows of pipes above the
+ * real one.
+ */
+export function spoken(words: string): string {
+  const end = words.indexOf(THOUGHT_ENDS);
+  return end === -1 ? words : words.slice(end + THOUGHT_ENDS.length);
+}
+
+const THOUGHT_ENDS = "</think>";
+
 function lastWordsOf(words: Turn["words"]): string {
   const last = words.at(-1);
   if (last === undefined) return "";

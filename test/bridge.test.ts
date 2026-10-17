@@ -7,9 +7,9 @@ import { strict as assert } from "node:assert";
 import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
 import { type Chips, connect, type Decision } from "@chipschat/harness";
-import { Bridge, type BridgeState, cardOf, decisionOf, keyOf, questionOf } from "../src/bridge.ts";
+import { Bridge, type BridgeState, cardOf, decisionOf, keyOf, questionOf, spoken } from "../src/bridge.ts";
 import { OpenCodeClient } from "../src/opencode.ts";
-import { type FakeOpenCode, startFakeOpenCode } from "./fake-opencode.ts";
+import { type FakeOpenCode, startFakeOpenCode, THOUGHTFUL } from "./fake-opencode.ts";
 
 interface Rig {
   readonly chips: FakeChips;
@@ -173,6 +173,17 @@ describe("a turn", () => {
     assert.deepEqual(opencode.created[0]?.model, { providerID: "nous", id: "heron-2" });
     assert.deepEqual(opencode.created[0]?.location, { directory: "/work" });
     assert.match(opencode.prompts[0]?.text ?? "", /summarise the notes$/);
+  });
+
+  it("says its answer without the thinking a model wrote into it (Chips, 17 October 2026)", async () => {
+    const { chips } = await rig();
+    await chips.say("think it over and make a table");
+    const started = await sent(chips, "run.started");
+    const words = await reply(chips, started.run_id);
+    assert.equal(words.payload["text"], THOUGHTFUL);
+    const completed = await sent(chips, "run.completed");
+    assert.equal(completed.payload["summary"], THOUGHTFUL);
+    assert.equal(spoken("No thinking here."), "No thinking here.");
   });
 
   it("keeps one OpenCode session per room, and a second message is the same session", async () => {

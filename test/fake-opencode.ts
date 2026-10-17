@@ -53,6 +53,9 @@ export interface Created {
   readonly metadata: unknown;
 }
 
+/** What the thinking model answers, once its thinking is over. */
+export const THOUGHTFUL = "Here it is:\n\n| Model | Score |\n|---|---|\n| A | 1 |";
+
 export interface FakeOpenCode {
   readonly url: string;
   readonly password: string;
@@ -186,6 +189,12 @@ export async function startFakeOpenCode(options: { askFirst?: boolean } = {}): P
       const answer = (await waitFor("frm_1")) as Record<string, unknown>;
       emit("form.replied", { id: "frm_1", sessionID: session.id, answer });
       return step(session, async (message) => say(session, message, `Chose: ${String(answer["q0"])}`));
+    }
+    if (/\bthink\b/.test(words)) {
+      // A model that writes its thinking into its answer, as big-pickle does.
+      return step(session, async (message) =>
+        say(session, message, `Let me build a table.\n\n| Model | Score |\n| A | 1 |</think>${THOUGHTFUL}`),
+      );
     }
     if (/\bfail\b/.test(words)) throw new Error("The model refused.");
     if (/\bslow\b/.test(words)) {
