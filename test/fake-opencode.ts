@@ -236,7 +236,8 @@ export async function startFakeOpenCode(options: { askFirst?: boolean } = {}): P
       session.inbox.splice(session.inbox.indexOf(item), 1);
       emit("session.inbox.delivered", { sessionID: session.id, inboxID: item.id });
       try {
-        await play(session, item.text);
+        // The person's words, the text's last line: not the room note before them, which may say "ask".
+        await play(session, item.text.split("\n").at(-1) ?? "");
       } catch (error) {
         failed = String((error as Error).message);
         break;

@@ -3,9 +3,9 @@
  * or one of the person's own) is a Chips agent (ADR 0087), registered by its own key. The first is
  * the harness's Main agent, in the harness's own room in the place of the default agent Chips gave
  * the harness there, and it answers for that default agent, and for any other of the harness's
- * Chips doesn't name here. A room an agent is in is one OpenCode session of that agent, made the
- * first time somebody there speaks to it, and kept across restarts: it shows in OpenCode's own
- * apps too.
+ * Chips doesn't name here: a new agent a person asks for in a room (Chips ADR 0108) is one. A room
+ * an agent is in is one OpenCode session of that agent, made the first time somebody there speaks
+ * to it, and kept across restarts: it shows in OpenCode's own apps too.
  *
  * A message for an agent is a run:
  * - The words go to the session's inbox (`POST …/prompt`): the room note, what was said, and the
@@ -22,7 +22,7 @@
 
 import type { Agent, ApprovalInput, Chips, Decision, Run, Speaker } from "@chipschat/harness";
 import { promptFor } from "@chipschat/harness";
-import { createIdGenerator, type MessageNew, type StepKind } from "@chipschat/protocol";
+import { type AgentAsked, createIdGenerator, type MessageNew, type StepKind } from "@chipschat/protocol";
 import {
   type FormAnswer,
   type ModelRef,
@@ -44,7 +44,10 @@ export interface AgentConfig {
 
 /** What the bridge keeps across restarts beside the SDK's own store. */
 export interface BridgeState {
-  /** `<agent key>|<space id>` → the OpenCode session that room is. */
+  /**
+   * `<agent key>|<space id>` → the OpenCode session that room is; for an agent not configured here,
+   * its Chips id in the place of the key.
+   */
   sessions: Record<string, string>;
 }
 
@@ -110,6 +113,10 @@ interface Asked {
 }
 
 interface Room {
+  /** Which agent's session in which room: its key in `BridgeState.sessions`. */
+  readonly id: string;
+  /** Whose session it is: the agent's key, or the Chips id of one not configured here. */
+  readonly who: string;
   readonly agent: Running;
   readonly spaceId: string;
   readonly queue: Asked[];
@@ -164,6 +171,11 @@ export class Bridge {
   private readonly rooms = new Map<string, Room>();
   /** The turn going in each OpenCode session. */
   private readonly turns = new Map<string, Turn>();
+  /**
+   * What a session said while it was being given a turn's words, before the turn was known: OpenCode
+   * may say it took them before it answers that it has them. Heard by the turn once it is.
+   */
+  private readonly early = new Map<string, OpenCodeEvent[]>();
   /** A sub-agent's child session → the session it works for. */
   private readonly parents = new Map<string, string>();
   /** Each model's context window, by `provider/model`. */
@@ -195,6 +207,9 @@ export class Bridge {
     this.ours = new Set([...known.map((agent) => agent.agentId), ...this.agents.map((agent) => agent.agentId)]);
     void this.listen();
     chips.on("message.new", (message) => void this.hear(message));
+    chips.on("agent.asked", (asked) => {
+      this.make(asked).catch((error: unknown) => this.log(`a new agent went wrong: ${messageOf(error)}`));
+    });
     await this.sayHowItIs();
     this.health = setInterval(() => void this.sayHowItIs(), this.options.healthEveryMs ?? 30_000);
     this.health.unref();
@@ -269,6 +284,24 @@ export class Bridge {
     }
   }
 
+  /**
+   * A person asked for a new agent in a room (Chips ADR 0108): one of the harness's, keyed by the
+   * ask so an ask heard twice makes one, registered for the room, which Chips puts it in while the
+   * room waits. It answers as the first OpenCode agent, in a session of its own.
+   */
+  private async make(asked: AgentAsked): Promise<void> {
+    const { chips } = this.options;
+    if (asked.harness_id !== chips.harnessId || asked.space_id === undefined) return;
+    const agent = await chips.agents.register({
+      key: `opencode:asked:${asked.id}`,
+      name: asked.name,
+      madeFor: asked.id,
+      spaceId: asked.space_id,
+    });
+    this.ours.add(agent.agentId);
+    this.log(`${agent.name} made${agent.attached === false ? `, not in the room: ${agent.why ?? "too late"}` : ""}`);
+  }
+
   // ------------------------------------------------------------------ what is said to it
 
   /** A message for some of its agents: each takes a turn in its room, one after another there. */
@@ -279,7 +312,7 @@ export class Bridge {
     for (const taker of message.for ?? [harnessId]) {
       const agent = await this.runnerOf(taker);
       if (agent === undefined) continue;
-      const room = this.roomOf(agent, spaceId);
+      const room = this.roomOf(agent, taker, spaceId);
       room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker });
       void this.pump(room);
     }
@@ -299,11 +332,17 @@ export class Bridge {
     return taker === this.options.chips.harnessId || this.ours.has(taker) ? this.agents[0] : undefined;
   }
 
-  private roomOf(agent: Running, spaceId: string): Room {
-    const id = `${agent.key}|${spaceId}`;
+  /**
+   * The session a turn is taken in: the OpenCode agent's own in the room, for its Chips agent or
+   * the harness itself, and one of its own for any other of the harness's, so two in a room are two.
+   */
+  private roomOf(agent: Running, taker: string, spaceId: string): Room {
+    const own = taker === agent.agentId || taker === this.options.chips.harnessId;
+    const who = own ? agent.key : taker;
+    const id = `${who}|${spaceId}`;
     let room = this.rooms.get(id);
     if (room === undefined) {
-      room = { agent, spaceId, queue: [], busy: false };
+      room = { id, who, agent, spaceId, queue: [], busy: false };
       this.rooms.set(id, room);
     }
     return room;
@@ -332,7 +371,7 @@ export class Bridge {
     let sessionId: string;
     let given: string;
     try {
-      ({ sessionId, given } = await this.give(agent, spaceId, text));
+      ({ sessionId, given } = await this.give(room, text));
     } catch (error) {
       await this.failed(run, `${agent.config.name} couldn't reach OpenCode: ${messageOf(error)}`, true);
       return;
@@ -360,8 +399,11 @@ export class Bridge {
       allowed: new Map(),
       chain: Promise.resolve(),
     };
+    const held = this.early.get(sessionId) ?? [];
+    this.early.delete(sessionId);
     this.turns.set(sessionId, turn);
     this.wait(turn, given);
+    for (const event of held) this.heard(event);
     run.on("cancel", () => void this.cancel(turn));
     run.on("steer", (steer) => {
       const words = `${steer.from?.display_name ?? "The person"} adds: ${steer.text}`;
@@ -375,13 +417,12 @@ export class Bridge {
   }
 
   /** The words into the room's session: the one it had, or a new one when OpenCode no longer has it. */
-  private async give(agent: Running, spaceId: string, text: string): Promise<{ sessionId: string; given: string }> {
+  private async give({ id, who, agent, spaceId }: Room, text: string): Promise<{ sessionId: string; given: string }> {
     const { opencode, state, saveState } = this.options;
-    const key = `${agent.key}|${spaceId}`;
-    const kept = state.sessions[key];
+    const kept = state.sessions[id];
     if (kept !== undefined) {
       try {
-        return { sessionId: kept, given: await opencode.prompt(kept, text) };
+        return { sessionId: kept, given: await this.prompted(kept, text) };
       } catch (error) {
         if (!(error instanceof OpenCodeError && error.tag === "SessionNotFoundError")) throw error;
         this.log(`${agent.config.name}'s session for ${spaceId} is gone from OpenCode: a new one`);
@@ -391,11 +432,22 @@ export class Bridge {
       title: `Chips room ${spaceId}`,
       agent: agent.config.agent,
       model: agent.model,
-      metadata: { chips_space: spaceId, chips_agent: agent.key },
+      metadata: { chips_space: spaceId, chips_agent: who },
     });
-    state.sessions[key] = made;
+    state.sessions[id] = made;
     saveState(state);
-    return { sessionId: made, given: await opencode.prompt(made, text) };
+    return { sessionId: made, given: await this.prompted(made, text) };
+  }
+
+  /** A turn's first words into a session, what it says meanwhile held for the turn. */
+  private async prompted(sessionId: string, text: string): Promise<string> {
+    this.early.set(sessionId, []);
+    try {
+      return await this.options.opencode.prompt(sessionId, text);
+    } catch (error) {
+      this.early.delete(sessionId);
+      throw error;
+    }
   }
 
   /** An inbox item of the turn's: waited for, unless the session took it already. */
@@ -454,6 +506,10 @@ export class Bridge {
       return;
     }
     const own = this.turns.get(sessionId);
+    if (own === undefined && this.early.has(sessionId)) {
+      this.early.get(sessionId)?.push(event);
+      return;
+    }
     const root = own ?? this.rootOf(sessionId);
     if (root === undefined) return;
     root.chain = root.chain

@@ -6,6 +6,8 @@ server (`opencode serve`, 2.0).
   the harness's Main agent.
 - Each Chips room an agent is in is an OpenCode session of that agent, made the first time somebody
   there speaks to it. It shows in OpenCode's own apps too.
+- A new agent a person asks for in a room (Add, then a new one) runs as the first OpenCode agent,
+  in a session of its own.
 
 Apache-2.0. Not published: a local repository until Chips's SDK is.
 
