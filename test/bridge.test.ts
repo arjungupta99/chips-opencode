@@ -27,9 +27,11 @@ afterEach(async () => {
 
 const AGENT = { name: "OpenCode", agent: "build" } as const;
 
-async function rig(options: { state?: BridgeState; model?: string; directory?: string } = {}): Promise<Rig> {
-  const chips = await startFakeChips({ capabilities: ["agents"] });
-  open.push(() => chips.close());
+async function rig(
+  options: { state?: BridgeState; model?: string; directory?: string; chips?: FakeChips } = {},
+): Promise<Rig> {
+  const chips = options.chips ?? (await startFakeChips({ capabilities: ["agents"] }));
+  if (options.chips === undefined) open.push(() => chips.close());
   const opencode = await startFakeOpenCode();
   open.push(() => opencode.close());
   const client = await connect({ url: chips.address.url, token: chips.address.token });
@@ -49,9 +51,7 @@ async function rig(options: { state?: BridgeState; model?: string; directory?: s
     client.close();
   });
   await bridge.start();
-  const agents = await client.agents.list();
-  const agentId = agents.find((each) => each.key === keyOf(AGENT))?.agentId ?? "";
-  return { chips, client, bridge, opencode, state, agentId };
+  return { chips, client, bridge, opencode, state, agentId: bridge.mainAgentId ?? "" };
 }
 
 async function until(done: () => boolean, timeoutMs = 3000): Promise<void> {
@@ -68,6 +68,41 @@ function sent(chips: FakeChips, type: string, more: (event: StoredEvent) => bool
 
 const reply = (chips: FakeChips, runId: string | null | undefined) =>
   sent(chips, "message.post", (event) => event.run_id === runId);
+
+// Its Main agent was "OpenCode 2" beside the "OpenCode" Chips made at the join (Chips ON-10).
+describe("its Main agent (Chips ADR 0183)", () => {
+  it("is the agent Chips made at the join, called what its config says, with no second", async () => {
+    const chips = await startFakeChips({ capabilities: ["agents"], harnessName: AGENT.name });
+    open.push(() => chips.close());
+    const { client, agentId } = await rig({ chips });
+    const agents = await client.agents.list();
+    assert.deepEqual(
+      agents.map((agent) => [agent.key, agent.name, agent.lead]),
+      [[client.harnessId, AGENT.name, true]],
+    );
+    assert.equal(agentId, agents[0]?.agentId);
+    assert.ok(agents[0]?.spaces.includes(chips.address.spaceId), "in its own room");
+  });
+
+  it("moves Main from one it made before, which it archives, and takes its room", async () => {
+    const chips = await startFakeChips({ capabilities: ["agents"], harnessName: AGENT.name });
+    open.push(() => chips.close());
+    // As a bridge did before: its own Main, numbered beside the default, in the default's place.
+    const before = await connect({ url: chips.address.url, token: chips.address.token });
+    const known = await before.agents.list();
+    const old = await before.agents.register({ key: keyOf(AGENT), name: AGENT.name, lead: true });
+    await before.agents.attach(old.agentId, { spaceId: chips.address.spaceId, replacing: known[0]?.agentId ?? "" });
+    before.close();
+    assert.equal(old.name, `${AGENT.name} 2`);
+    const { client, agentId } = await rig({ chips });
+    const agents = await client.agents.list();
+    const main = agents.find((agent) => agent.agentId === agentId);
+    assert.deepEqual([main?.key, main?.name, main?.lead], [client.harnessId, AGENT.name, true]);
+    assert.ok(main?.spaces.includes(chips.address.spaceId), "back in its own room");
+    const gone = agents.find((agent) => agent.agentId === old.agentId);
+    assert.deepEqual([gone?.lead, gone?.state], [false, "archived"]);
+  });
+});
 
 describe("a turn", () => {
   it("is a run: a status, a step drawn by its kind, its last words, its exact cost and context, and the end", async () => {
