@@ -21,7 +21,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { connect, fileStore, helloOnce, join as joinChips } from "@chipschat/harness";
+import { connect, fileStore, helloOnce, JoinError, join as joinChips } from "@chipschat/harness";
 import { Bridge, type BridgeState } from "./bridge.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { OpenCodeClient } from "./opencode.js";
@@ -62,6 +62,8 @@ if (config.ownServer) {
     stop(new SetupError(link === undefined ? error.message : `${error.message} ${STILL_GOOD}`));
   }
 }
+// However this process ends, a failed join included, the server it started ends with it.
+process.on("exit", () => server?.stop());
 const address = server ?? { url: config.url, password: config.password ?? "" };
 const opencode = new OpenCodeClient({ url: address.url, password: address.password, directory: config.directory });
 // With a link, which works once, OpenCode answers before it is taken up; after that, a bridge
@@ -79,6 +81,12 @@ for (const agent of config.agents) {
   }
 }
 
+/** A link Chips refuses (spent, expired, not a link), said plainly: its words, no stack. */
+const refused = (error: unknown): never => {
+  if (!(error instanceof JoinError)) throw error;
+  process.stderr.write(`${error.message}\n`);
+  process.exit(1);
+};
 const joined = await joinChips({
   link,
   url: process.env["CHIPS_URL"],
@@ -86,7 +94,7 @@ const joined = await joinChips({
   software: "chips-opencode 0.1.0",
   wants: ["agents", "new_agents"],
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
-});
+}).catch(refused);
 // Joined, `npm run keep` hands over to a copy kept running, which says the hello. It takes the
 // server's password with it, in a file only its user can read; or, running its own server, stops
 // it first, for the kept copy to run and watch its own.
