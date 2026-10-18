@@ -25,7 +25,8 @@ import { connect, fileStore, helloOnce, join as joinChips } from "@chipschat/har
 import { Bridge, type BridgeState } from "./bridge.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { OpenCodeClient } from "./opencode.js";
-import { type Config, checkOpenCode, readConfig, SetupError } from "./setup.js";
+import { type OwnServer, ownServer, ServerError } from "./server.js";
+import { type Config, checkOpenCode, readConfig, SetupError, STILL_GOOD } from "./setup.js";
 
 const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 const link = process.env["CHIPS_JOIN_LINK"] || undefined;
@@ -49,13 +50,26 @@ const folder = dirname(configPath);
 mkdirSync(folder, { recursive: true, mode: 0o700 });
 const statePath = join(folder, "sessions.json");
 
-const opencode = new OpenCodeClient({ url: config.url, password: config.password, directory: config.directory });
+// Nobody's own server named: the bridge runs one, and stops it when it stops.
+let server: OwnServer | undefined;
+if (config.ownServer) {
+  const cwd = config.directory ?? dirname(config.folders);
+  mkdirSync(cwd, { recursive: true });
+  try {
+    server = await ownServer({ folder, cwd, log });
+  } catch (error) {
+    if (!(error instanceof ServerError)) throw error;
+    stop(new SetupError(link === undefined ? error.message : `${error.message} ${STILL_GOOD}`));
+  }
+}
+const address = server ?? { url: config.url, password: config.password ?? "" };
+const opencode = new OpenCodeClient({ url: address.url, password: address.password, directory: config.directory });
 // With a link, which works once, OpenCode answers before it is taken up; after that, a bridge
 // started before OpenCode takes its agents as configured and says so.
 const offered = link !== undefined
   ? await checkOpenCode(config, opencode).catch(stop)
   : await opencode.agents().catch((error: unknown) => {
-      log(`OpenCode isn't answering at ${config.url} yet (${String(error)}): its agents are taken as configured`);
+      log(`OpenCode isn't answering at ${address.url} yet (${String(error)}): its agents are taken as configured`);
       return undefined;
     });
 for (const agent of config.agents) {
@@ -74,8 +88,9 @@ const joined = await joinChips({
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
 });
 // Joined, `npm run keep` hands over to a copy kept running, which says the hello. It takes the
-// server's password with it, in a file only its user can read.
-keepIfAsked(LABEL, joined.url, [config.passwordEnv], log);
+// server's password with it, in a file only its user can read; or, running its own server, stops
+// it first, for the kept copy to run and watch its own.
+keepIfAsked(LABEL, joined.url, [config.passwordEnv], log, () => server?.stop());
 
 const state: BridgeState = existsSync(statePath)
   ? (JSON.parse(readFileSync(statePath, "utf8")) as BridgeState)
@@ -99,7 +114,7 @@ const bridge = new Bridge({
   ...(config.directory === undefined ? { folders: config.folders } : {}),
 });
 await bridge.start();
-log(`answering for ${config.agents.map((agent) => agent.name).join(", ")} through OpenCode at ${config.url}`);
+log(`answering for ${config.agents.map((agent) => agent.name).join(", ")} through OpenCode at ${address.url}`);
 
 // Its first words in the room it joined, once: the card that followed its link waits for them.
 const main = bridge.mainAgentId;
@@ -116,6 +131,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     bridge.stop();
     chips.close();
+    server?.stop();
     process.exit(0);
   });
 }

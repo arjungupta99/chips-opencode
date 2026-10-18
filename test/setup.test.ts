@@ -4,6 +4,7 @@
  */
 
 import { strict as assert } from "node:assert";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it } from "node:test";
@@ -17,14 +18,23 @@ const stopsWith = (pattern: RegExp) => (error: unknown) =>
   error instanceof SetupError && pattern.test(error.message) && error.message.includes(STILL_GOOD);
 
 describe("before the link is taken up", () => {
-  it("stops on a password left as the command's placeholder, or not set", () => {
-    assert.throws(() => readConfig(none, { OPENCODE_PASSWORD: "…" }), stopsWith(/isn't in \$OPENCODE_PASSWORD/));
-    assert.throws(() => readConfig(none, {}), stopsWith(/isn't in \$OPENCODE_PASSWORD/));
+  it("runs its own server with no password and no server named, the placeholder counting as none (HS-5)", () => {
+    for (const env of [{}, { OPENCODE_PASSWORD: "…" }]) {
+      const read = readConfig(none, env);
+      assert.equal(read.ownServer, true);
+      assert.equal(read.password, undefined);
+    }
   });
 
-  it("takes the defaults with no config, and the password filled in", () => {
+  it("takes a person's own server with the password filled in, as before", () => {
     const read = readConfig(none, { OPENCODE_PASSWORD: "hunter22" });
-    assert.deepEqual([read.url, read.agents[0]?.agent], ["http://127.0.0.1:4096", "build"]);
+    assert.deepEqual([read.ownServer, read.url, read.agents[0]?.agent], [false, "http://127.0.0.1:4096", "build"]);
+  });
+
+  it("stops on a server named in the config with no password for it", () => {
+    const named = join(mkdtempSync(join(tmpdir(), "chips-opencode-named-")), "config.json");
+    writeFileSync(named, JSON.stringify({ url: "http://127.0.0.1:4097" }));
+    assert.throws(() => readConfig(named, { OPENCODE_PASSWORD: "…" }), stopsWith(/isn't in \$OPENCODE_PASSWORD: give it the one `opencode serve` at http:\/\/127\.0\.0\.1:4097/));
   });
 
   it("stops on a password OpenCode refuses, or OpenCode not answering, and goes on when it answers", async () => {

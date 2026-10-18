@@ -47,43 +47,41 @@ Not yet:
 
 ## Run it
 
-1. Start OpenCode's server, anywhere, with a password:
+1. Install OpenCode (opencode.ai), and `npm install` once in this repository.
 
-   ```
-   OPENCODE_PASSWORD=<a long random password> opencode serve
-   ```
-
-   It listens on `127.0.0.1:4096`.
-
-2. Optionally, name the agents in `~/.chips-opencode/config.json` (see `config.example.json`).
-   Without a config it is OpenCode's `build` agent, named OpenCode, on `127.0.0.1:4096`. The
-   password is read from the environment variable `passwordEnv` names (`OPENCODE_PASSWORD` by
-   default), never from the file.
-
-   Each agent's sessions work in a folder of its own, `~/chips-opencode/agents/<its name>`, made
-   the first time it is spoken to and kept after a rename; `folders` moves them. A `directory`
-   puts every session in that one project instead, a repository the agents share. A session made
-   before an agent had its folder goes on in the server's own directory.
-
-3. Join Chips once, with a link from Chips's gallery (Add an agent → OpenCode), whose card gives
+2. Join Chips once, with a link from Chips's gallery (Add an agent → OpenCode), whose card gives
    this line with the link in it:
 
    ```
-   cd ~/Work/chips-opencode && CHIPS_JOIN_LINK='<link>' OPENCODE_PASSWORD=<the server's password> npm start
+   cd ~/Work/chips-opencode && CHIPS_JOIN_LINK='<link>' npm run keep
    ```
 
-   Or with `CHIPS_URL` and a code a person allows. Before it takes the link up, which works once,
-   it checks the password is filled in (not the card's `…`) and OpenCode answers to it; anything
-   missing stops it with what to do, and the link is still good. Joined, its Main agent says hello
-   in its room once, which the card waits for. The key Chips gives it is kept, so later starts need
-   only the password; a new link from Chips replaces it.
+   The bridge runs OpenCode's server itself (`opencode serve` on `127.0.0.1`, 4096 when it is
+   free), with a password it makes and keeps in `~/.chips-opencode/server.json`, readable by you
+   only: nobody starts a server or makes up a password. While the bridge runs, a server that stops
+   is started again; when the bridge stops, so does its server.
 
-4. To keep it running: `npm run keep` in the place of `npm start`, with the link or without. Joined,
-   it writes a launch agent (`~/Library/LaunchAgents/chat.chips.opencode.plist`; a systemd user
-   unit on Linux) that runs the bridge from login and again whenever it stops, carrying the
-   password in a file only you can read, and ends. Its log is `~/Library/Logs/chips-opencode.log`.
-   `npm run keep -- --stop` stops it and removes the file. Stop a copy started by hand first: two
-   answer twice. `opencode serve` is kept running its own way.
+   Before it takes the link up, which works once, it checks OpenCode is installed and its server
+   answers; anything missing stops it with what to do, and the link is still good. Joined, it
+   writes a launch agent (`~/Library/LaunchAgents/chat.chips.opencode.plist`; a systemd user unit
+   on Linux) that runs the bridge from login and again whenever it stops, and ends; the kept copy
+   says hello in its room once, which the card waits for. Its log is
+   `~/Library/Logs/chips-opencode.log`. `npm run keep -- --stop` stops it and removes the file.
+   `npm start` is the same without keeping it, in the terminal. Stop a copy started by hand first:
+   two answer twice. The key Chips gives it is kept; a new link from Chips replaces it. Or join with
+   `CHIPS_URL` and a code a person allows.
+
+3. Optionally, name the agents in `~/.chips-opencode/config.json` (see `config.example.json`).
+   Without a config it is OpenCode's `build` agent, named OpenCode.
+
+   Each agent's sessions work in a folder of its own, `~/chips-opencode/agents/<its name>`, made
+   the first time it is spoken to and kept after a rename; `folders` moves them. A `directory`
+   puts every session in that one project instead, a repository the agents share.
+
+   **A server of your own.** To use an `opencode serve` you run yourself, give its password in the
+   environment variable `passwordEnv` names (`OPENCODE_PASSWORD` by default, never in the file),
+   and its `url` in the config when it isn't `127.0.0.1:4096`. `npm run keep` takes the password
+   with it, in a file only you can read; your server is kept running your own way.
 
 ## Tests
 

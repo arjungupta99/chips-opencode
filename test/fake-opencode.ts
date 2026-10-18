@@ -76,13 +76,13 @@ export interface FakeOpenCode {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function startFakeOpenCode(
-  options: { askFirst?: boolean; directory?: string; cold?: boolean } = {},
+  options: { askFirst?: boolean; directory?: string; cold?: boolean; port?: number; password?: string } = {},
 ): Promise<FakeOpenCode> {
   /** With `cold`, its first catalogue answers are empty, as OpenCode 2.0's are for a project it hasn't loaded. */
   let cold = options.cold === true ? 2 : 0;
   /** The project its sessions work in, as OpenCode says it. */
   const directory = options.directory ?? "/work";
-  const password = "opencode-test-password";
+  const password = options.password ?? "opencode-test-password";
   const auth = `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`;
   const sessions = new Map<string, FakeSession>();
   const streams = new Set<ServerResponse>();
@@ -422,7 +422,7 @@ export async function startFakeOpenCode(
       if (!response.headersSent) json(response, 500, { _tag: "Defect", message: String(error) });
     });
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => server.listen(options.port ?? 0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   return Object.assign(fake, {
     url: `http://127.0.0.1:${port}`,

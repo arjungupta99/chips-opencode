@@ -15,8 +15,14 @@ import { type AgentInfo, OpenCodeError } from "./opencode.js";
 export interface Config {
   readonly name: string;
   readonly url: string;
-  readonly password: string;
+  /** The password of a server a person runs; none when the bridge runs its own (`ownServer`). */
+  readonly password: string | undefined;
   readonly passwordEnv: string;
+  /**
+   * The bridge runs OpenCode's server itself: no `url` in the config and no password in the
+   * environment, so nobody starts `opencode serve` by hand (setup audit HS-5).
+   */
+  readonly ownServer: boolean;
   /** One project every session works in: a repository they share. Each agent has its own folder when absent. */
   readonly directory: string | undefined;
   /** Where each agent's own folder is made, without a `directory`. */
@@ -37,10 +43,11 @@ const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.sli
 export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): Config {
   const raw = (existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {}) as Record<string, unknown>;
   const passwordEnv = typeof raw["passwordEnv"] === "string" ? raw["passwordEnv"] : "OPENCODE_PASSWORD";
-  const password = env[passwordEnv];
-  if (!filledIn(password)) {
+  const password = filledIn(env[passwordEnv]) ? env[passwordEnv] : undefined;
+  const ownServer = password === undefined && typeof raw["url"] !== "string";
+  if (password === undefined && !ownServer) {
     throw new SetupError(
-      `OpenCode's server password isn't in $${passwordEnv}: start \`opencode serve\` with one, and give it here too, not the … from the command. ${STILL_GOOD}`,
+      `OpenCode's server password isn't in $${passwordEnv}: give it the one \`opencode serve\` at ${String(raw["url"])} was started with, not the … from the command. ${STILL_GOOD}`,
     );
   }
   const listed = Array.isArray(raw["agents"]) ? (raw["agents"] as Record<string, unknown>[]) : [{ name: "OpenCode", agent: "build" }];
@@ -60,6 +67,7 @@ export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
     url: typeof raw["url"] === "string" ? raw["url"] : "http://127.0.0.1:4096",
     password,
     passwordEnv,
+    ownServer,
     directory: typeof raw["directory"] === "string" ? resolve(home(raw["directory"])) : undefined,
     folders: resolve(home(typeof raw["folders"] === "string" ? raw["folders"] : "~/chips-opencode/agents")),
     agents,

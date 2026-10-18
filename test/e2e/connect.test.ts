@@ -3,12 +3,16 @@
  * OpenCode (Chips ADRs 0122, 0171; its findings' ON-8): what isn't set up stops it before the link
  * is spent; then it joins with what the card grants and says hello once; started again it says
  * nothing more; and a new link is taken up in place of the key it kept.
+ *
+ * The card's line carries no password and keeps the bridge running (`npm run keep`; Chips's setup
+ * audit HS-5, HS-15): the bridge runs OpenCode's server itself, here the fake as `opencode` on a
+ * PATH of its own, and the kit's `CHIPS_KEEP=off` keeps it in the foreground, never a launch agent.
  */
 
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { STILL_GOOD } from "../../src/setup.ts";
 import { type FakeOpenCode, startFakeOpenCode } from "../fake-opencode.ts";
@@ -19,20 +23,21 @@ const ANSWERING = /answering for OpenCode through OpenCode at http:\/\/127\.0\.0
 
 describe("OpenCode's card, from a link to its hello", { skip, timeout: 180_000 }, () => {
   let chips: ScratchChips;
+  /** A person's own server, for the one stop that names it. */
   let opencode: FakeOpenCode;
   let home: string;
   let card: CardLink;
-  /** The card's command with a password filled in, as a person fills it. */
-  const filled = (command: string, password = opencode.password) =>
-    command.replace("OPENCODE_PASSWORD=…", `OPENCODE_PASSWORD=${password}`);
+  /** A PATH with OpenCode installed on it (the fake), and one whose OpenCode won't start. */
+  let installed: string;
+  let broken: string;
   const kept = () =>
     Object.values(JSON.parse(readFileSync(join(home, ".config/chips/harness-keys.json"), "utf8")) as Record<string, string>).map(
       (record) => JSON.parse(record) as { harnessId: string; hello: string },
     );
   const hellos = async (spaceId: string) => (await chips.said(spaceId)).filter((each) => HELLO.test(each.text));
   /** The command run to its end: what not being set up stops it with. */
-  const stopped = async (command: string, says: RegExp) => {
-    const run = chips.run(command, { folder: here, home });
+  const stopped = async (command: string, says: RegExp, path?: string) => {
+    const run = chips.run(command, { folder: here, home, ...(path === undefined ? {} : { path }) });
     assert.equal(await run.exited, 1, run.output());
     assert.match(run.output(), says);
     assert.ok(run.output().includes(STILL_GOOD), run.output());
@@ -43,9 +48,17 @@ describe("OpenCode's card, from a link to its hello", { skip, timeout: 180_000 }
     [chips, opencode] = await Promise.all([scratchChips(), startFakeOpenCode()]);
     home = mkdtempSync(join(tmpdir(), "chips-opencode-home-"));
     card = await chips.card("opencode");
-    // Where this OpenCode serves: the one thing the defaults can't know.
-    mkdirSync(join(home, ".chips-opencode"));
-    writeFileSync(join(home, ".chips-opencode", "config.json"), JSON.stringify({ url: opencode.url }));
+    const shim = (folder: string, script: string) => {
+      mkdirSync(folder, { recursive: true });
+      writeFileSync(join(folder, "opencode"), script);
+      chmodSync(join(folder, "opencode"), 0o755);
+      return `${folder}${delimiter}${process.env["PATH"] ?? ""}`;
+    };
+    installed = shim(
+      join(home, "bin"),
+      `#!/bin/sh\nexec "${process.execPath}" --import "${import.meta.resolve("tsx")}" "${join(here, "test", "fake-serve.ts")}" "$@"\n`,
+    );
+    broken = shim(join(home, "broken"), "#!/bin/sh\necho 'Error: no provider is configured' >&2\nexit 1\n");
   });
 
   after(async () => {
@@ -54,15 +67,20 @@ describe("OpenCode's card, from a link to its hello", { skip, timeout: 180_000 }
   });
 
   it("stops on each thing not set up, and leaves the link good", async () => {
-    await stopped(card.command, /OpenCode's server password isn't in \$OPENCODE_PASSWORD/);
-    await stopped(filled(card.command, "not-the-one"), /refused the password in \$OPENCODE_PASSWORD/);
-    opencode.up = false;
-    await stopped(filled(card.command), /OpenCode isn't answering at http:\/\/127\.0\.0\.1:\d+/);
-    opencode.up = true;
+    // No OpenCode on a PATH of node and the system's.
+    const bare = [process.execPath.replace(/\/node$/, ""), "/usr/bin", "/bin"].join(delimiter);
+    await stopped(card.command, /OpenCode isn't installed on this machine: install it \(opencode\.ai\)/, bare);
+    await stopped(card.command, /OpenCode's server didn't start at http:\/\/127\.0\.0\.1:\d+: Error: no provider is configured/, broken);
+    // A person's own server named in the config, without its password; then the config gone again.
+    mkdirSync(join(home, ".chips-opencode"), { recursive: true });
+    const config = join(home, ".chips-opencode", "config.json");
+    writeFileSync(config, JSON.stringify({ url: opencode.url }));
+    await stopped(card.command, /isn't in \$OPENCODE_PASSWORD: give it the one `opencode serve` at http:\/\/127\.0\.0\.1:\d+/, installed);
+    rmSync(config);
   });
 
   it("joins with what the card grants, and says hello once in its room", async () => {
-    const run = chips.run(filled(card.command), { folder: here, home });
+    const run = chips.run(card.command, { folder: here, home, path: installed });
     try {
       const request = await chips.until("the link taken up", async () => {
         const read = await chips.request(card.requestId);
@@ -72,6 +90,8 @@ describe("OpenCode's card, from a link to its hello", { skip, timeout: 180_000 }
       assert.deepEqual([...(await chips.capabilities(request.harness_id))].sort(), [...card.capabilities].sort());
       await chips.until("its hello", async () => (await hellos(request.space_id!)).length > 0);
       await run.saw(ANSWERING);
+      assert.match(run.output(), /OpenCode's own server answering at http:\/\/127\.0\.0\.1:\d+/);
+      assert.match(run.output(), /Keeping it running is off here \(CHIPS_KEEP=off\)/);
       assert.equal((await hellos(request.space_id)).length, 1);
       // Marked said once it is: the key it kept is the one the link handed it.
       await chips.until("its hello marked said", async () => kept()[0]?.hello === "said");
@@ -88,7 +108,7 @@ describe("OpenCode's card, from a link to its hello", { skip, timeout: 180_000 }
 
   it("started again with the same command, says nothing more", async () => {
     const { space_id } = await chips.request(card.requestId);
-    const run = chips.run(filled(card.command), { folder: here, home });
+    const run = chips.run(card.command, { folder: here, home, path: installed });
     try {
       await run.saw(ANSWERING);
       // Its hello, were it to say one, comes straight after.
@@ -102,7 +122,7 @@ describe("OpenCode's card, from a link to its hello", { skip, timeout: 180_000 }
   it("takes up a new link in place of the key it kept, and says hello in the new room", async () => {
     const first = await chips.request(card.requestId);
     const again = await chips.card("opencode");
-    const run = chips.run(filled(again.command), { folder: here, home });
+    const run = chips.run(again.command, { folder: here, home, path: installed });
     try {
       const request = await chips.until("the new link taken up", async () => {
         const read = await chips.request(again.requestId);
