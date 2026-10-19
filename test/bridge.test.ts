@@ -10,9 +10,10 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
 import { type Chips, connect, type Decision } from "@chipschat/harness";
-import { Bridge, type BridgeState, cardOf, decisionOf, freeFolder, keyOf, questionOf, spoken } from "../src/bridge.ts";
+import { createIdGenerator } from "@chipschat/protocol";
+import { Bridge, type BridgeState, cardOf, decisionOf, freeFolder, keyOf, questionOf, secondLook, spoken } from "../src/bridge.ts";
 import { OpenCodeClient } from "../src/opencode.ts";
-import { type FakeOpenCode, startFakeOpenCode, THOUGHTFUL } from "./fake-opencode.ts";
+import { AGAIN, type FakeOpenCode, startFakeOpenCode, THOUGHTFUL } from "./fake-opencode.ts";
 
 interface Rig {
   readonly chips: FakeChips;
@@ -72,6 +73,31 @@ function sent(chips: FakeChips, type: string, more: (event: StoredEvent) => bool
 
 const reply = (chips: FakeChips, runId: string | null | undefined) =>
   sent(chips, "message.post", (event) => event.run_id === runId);
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * A person's feedback on a message, as Chips hands it to the harness whose message it is, with who
+ * gave it (Chips ADR 0200). The fake's door has no `from` to fill in for one, so it goes in past it.
+ */
+function feedback(chips: FakeChips, fields: Readonly<Record<string, unknown>>): void {
+  const workspace = chips.workspace as unknown as { appendSystem(event: Record<string, unknown>): StoredEvent };
+  const { participantId, displayName } = chips.workspace.owner;
+  workspace.appendSystem({
+    type: "feedback",
+    space_id: chips.address.spaceId,
+    from: { participant_id: participantId, kind: "person", display_name: displayName, role: "owner" },
+    ...fields,
+  });
+}
+
+/** The message an agent said in a room, as the room's lines name it. */
+async function saidBy(client: Chips, spaceId: string, agentId: string): Promise<string> {
+  const lines = (await client.roomContext(spaceId, { limit: 200 })).lines;
+  return lines.find((line) => line.kind === "said" && line.from.id === agentId)?.message_id ?? "";
+}
+
+const count = (chips: FakeChips, type: string) => chips.workspace.log.filter((event) => event.type === type).length;
 
 // Its Main agent was "OpenCode 2" beside the "OpenCode" Chips made at the join (Chips ON-10).
 describe("its Main agent (Chips ADR 0183)", () => {
@@ -398,6 +424,102 @@ describe("what a person does to it", () => {
     assert.equal(opencode.interrupts.length, 1);
     assert.equal(opencode.prompts[1]?.delivery, undefined);
     assert.match(opencode.prompts[1]?.text ?? "", /adds: Just summarise\.$/);
+  });
+});
+
+// Chips offered Not right? on an agent's message, and only Jacobian answered it (Chips ADR 0200).
+describe("a person's Not right?", () => {
+  const NOTE = "Missed what I asked. Sunday is our flight home.";
+
+  it("is a run by the agent who said it, in its session for the room, with its reply and the note", async () => {
+    const chips = await startFakeChips({ capabilities: ["agents", "new_agents"] });
+    open.push(() => chips.close());
+    const { client, agentId, opencode, state } = await rig({ chips });
+    const room = await chips.openRoom("Trip");
+    for (const name of ["Nova", "Vega"]) {
+      const { askId } = await chips.askForAgent(room, name);
+      await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId);
+    }
+    const vega = (await client.agents.list()).find((agent) => agent.agentId !== agentId && agent.name === "Vega")?.agentId ?? "";
+    await chips.say("when do we fly home?", room);
+    await until(() => count(chips, "run.completed") === 2);
+    feedback(chips, { space_id: room, message_id: await saidBy(client, room, vega), kind: "correction", text: NOTE });
+    const started = await sent(chips, "run.started", (event) => event.payload["goal"] === `Looking again: ${NOTE}`);
+    assert.equal(started.actor.id, vega, "the agent who said it");
+    assert.equal((await reply(chips, started.run_id)).payload["text"], AGAIN);
+    await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+    assert.equal(opencode.created.length, 2, "no new session");
+    const again = opencode.prompts.at(-1);
+    assert.equal(again?.sessionId, state.sessions[`${vega}|${room}`], "Vega's own in the room");
+    assert.match(
+      again?.text ?? "",
+      new RegExp(
+        "Arjun says your reply in this room wasn't right\\.\n\nYour reply:\n«Here is the answer\\.»\n\n" +
+          `What wasn't right: «${NOTE.replace(/\./g, "\\.")}»\n\nLook at it again and answer properly in its place\\.`,
+      ),
+    );
+    const posts = chips.workspace.log.filter((event) => event.type === "message.post" && event.run_id === started.run_id);
+    assert.equal(posts.length, 1, "nothing said in the room but its answer");
+  });
+
+  it("is nothing for a 👍, or any other reaction", async () => {
+    const { chips, client, agentId, opencode } = await rig();
+    await chips.say("one");
+    await sent(chips, "run.completed");
+    const messageId = await saidBy(client, chips.address.spaceId, agentId);
+    feedback(chips, { message_id: messageId, kind: "reaction", reaction: "👍" });
+    feedback(chips, { message_id: messageId, kind: "reaction", reaction: "🎉" });
+    await chips.say("two");
+    await until(() => count(chips, "run.completed") === 2);
+    await sleep(150);
+    assert.equal(count(chips, "run.started"), 2);
+    assert.equal(opencode.prompts.length, 2);
+  });
+
+  it("takes a 👎 from a device from before it as the same, saying they didn't say what", async () => {
+    const { chips, client, agentId, opencode } = await rig();
+    await chips.say("one");
+    await sent(chips, "run.completed");
+    feedback(chips, { message_id: await saidBy(client, chips.address.spaceId, agentId), kind: "reaction", reaction: "👎" });
+    const started = await sent(chips, "run.started", (event) => event.payload["goal"] === "Looking again at its reply");
+    assert.equal((await reply(chips, started.run_id)).payload["text"], AGAIN);
+    const again = opencode.prompts[1]?.text ?? "";
+    assert.match(again, /«Here is the answer\.»\n\nThey didn't say what\. Read your reply again and find what was wrong\.\n\n/);
+    assert.doesNotMatch(again, /What wasn't right/);
+    assert.equal(opencode.prompts[1]?.sessionId, opencode.prompts[0]?.sessionId);
+  });
+
+  it("answers a feedback once, however often it is heard", async () => {
+    const { chips, client, agentId, opencode } = await rig();
+    await chips.say("one");
+    await sent(chips, "run.completed");
+    const same = { id: createIdGenerator().next("event"), message_id: await saidBy(client, chips.address.spaceId, agentId) };
+    feedback(chips, { ...same, kind: "correction", text: "Too long." });
+    feedback(chips, { ...same, kind: "correction", text: "Too long." });
+    const started = await sent(chips, "run.started", (event) => event.payload["goal"] === "Looking again: Too long.");
+    await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+    await sleep(150);
+    assert.equal(count(chips, "run.started"), 2);
+    assert.equal(opencode.prompts.length, 2);
+  });
+
+  it("goes to the room's own agent for a message the room doesn't have, with no reply to quote", async () => {
+    const { chips, agentId, opencode } = await rig();
+    feedback(chips, { message_id: createIdGenerator().next("message"), kind: "correction", text: "Wrong facts." });
+    const started = await sent(chips, "run.started");
+    assert.equal(started.payload["goal"], "Looking again: Wrong facts.");
+    assert.equal(started.actor.id, agentId);
+    assert.equal((await reply(chips, started.run_id)).payload["text"], AGAIN);
+    const again = opencode.prompts[0]?.text ?? "";
+    assert.match(again, /Arjun says your reply in this room wasn't right\.\n\nWhat wasn't right: «Wrong facts\.»/);
+    assert.doesNotMatch(again, /Your reply:/);
+  });
+
+  it("quotes at most 1500 characters of the reply, and calls the run by the note's first line, at most 120", () => {
+    const look = secondLook("Arjun", "a".repeat(2000), `${"b".repeat(200)}\nAnd more.`);
+    assert.equal(/«(a+…)»/.exec(look.text)?.[1]?.length, 1500);
+    assert.equal(look.goal.length, 120);
+    assert.match(look.goal, /^Looking again: b+…$/);
   });
 });
 

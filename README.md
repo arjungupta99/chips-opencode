@@ -28,6 +28,7 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | A question | a `form.created` whose fields are choices or yes-or-no, at most four → `POST …/form/{id}/reply` |
 | Stop | `POST …/interrupt`, and the words OpenCode hasn't taken yet taken back |
 | A steer, a follow-up, an interrupt | a prompt with `delivery: "steer"`; with `"queue"`; interrupt, then a prompt |
+| Not right? on an agent's reply (Chips ADR 0200), or a 👎 from an older device | a run of the agent who said it, in its session for the room, after its turns there: a prompt with its reply, what wasn't right, and to answer again in its place; the goal is *Looking again:* and the note's first line. A 👍, or any other reaction, is nothing |
 | Trouble on the harness | `GET /api/info` every 30 s |
 
 OpenCode asks before anything its config and the agent don't allow (its rules fall back to "ask"),

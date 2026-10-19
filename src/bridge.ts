@@ -18,13 +18,16 @@
  * - At the end come its last words in the room.
  * - Stop interrupts the session. A steer, a follow-up and an interrupt are OpenCode's own `steer`,
  *   `queue`, and interrupt-then-prompt.
+ *
+ * A person's Not right? on an agent's message (Chips ADR 0200) is a run too: the agent who said
+ * it looks again, in its session for the room, and its answer goes in the reply's place.
  */
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Agent, ApprovalInput, Chips, Decision, Run, Speaker } from "@chipschat/harness";
 import { promptFor, sendAnswer } from "@chipschat/harness";
-import { type AgentAsked, createIdGenerator, type MessageNew, type StepKind } from "@chipschat/protocol";
+import { type AgentAsked, createIdGenerator, type Feedback, type MessageNew, type StepKind } from "@chipschat/protocol";
 import {
   type FormAnswer,
   type ModelRef,
@@ -95,6 +98,10 @@ const ids = createIdGenerator();
 const QUIET_MS = 1500;
 /** Held in a turn's waiting words while an interrupt stops the session, so its end isn't the turn's. */
 const INTERRUPTING = "interrupting";
+/** How many feedbacks answered are remembered, so one heard again is nothing: a replay comes soon. */
+const LOOKS_KEPT = 500;
+/** How much of a reply a second look quotes. */
+const REPLY_CHARS = 1500;
 
 /**
  * What kind of call each of OpenCode's own tools is, in Chips's words (Chips ADR 0162). A tool not
@@ -132,6 +139,8 @@ interface Asked {
   readonly message: MessageNew;
   /** The Chips agent it was for, or none where Chips named only the harness. */
   readonly speakerId: string | undefined;
+  /** What the run is called, where not the message's first line: a second look's (Chips ADR 0200). */
+  readonly goal?: string | undefined;
 }
 
 interface Room {
@@ -208,6 +217,8 @@ export class Bridge {
   private readonly unlisted = new Set<string>();
   /** Every Chips agent of the harness's, configured here or not. */
   private ours = new Set<string>();
+  /** The feedbacks a second look was asked for, by their ids, the newest `LOOKS_KEPT`. */
+  private readonly looked = new Set<string>();
   private readonly log: (line: string) => void;
   private health: ReturnType<typeof setInterval> | undefined;
   private readonly listening = new AbortController();
@@ -233,6 +244,9 @@ export class Bridge {
     chips.on("message.new", (message) => void this.hear(message));
     chips.on("agent.asked", (asked) => {
       this.make(asked).catch((error: unknown) => this.log(`a new agent went wrong: ${messageOf(error)}`));
+    });
+    chips.on("feedback", (feedback) => {
+      this.notRight(feedback).catch((error: unknown) => this.log(`a second look went wrong: ${messageOf(error)}`));
     });
     await this.sayHowItIs();
     this.health = setInterval(() => void this.sayHowItIs(), this.options.healthEveryMs ?? 30_000);
@@ -329,7 +343,7 @@ export class Bridge {
   // ------------------------------------------------------------------ what is said to it
 
   /** A message for some of its agents: each takes a turn in its room, one after another there. */
-  private async hear(message: MessageNew): Promise<void> {
+  private async hear(message: MessageNew, goal?: string): Promise<void> {
     const spaceId = message.space_id;
     if (spaceId === undefined) return;
     const harnessId = this.options.chips.harnessId;
@@ -337,9 +351,39 @@ export class Bridge {
       const agent = await this.runnerOf(taker);
       if (agent === undefined) continue;
       const room = this.roomOf(agent, taker, spaceId);
-      room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker });
+      room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker, goal });
       void this.pump(room);
     }
+  }
+
+  /**
+   * A person's Not right? on one of its agents' messages (Chips ADR 0200): their note, or a 👎
+   * from a device from before it, is a message for the agent who said it, found by the message in
+   * the room's lines, and heard as any other, after what that agent's session there has to do
+   * first. A message the room no longer has goes to whoever a message for nobody would. Any other
+   * reaction, a 👍 among them, is nothing, and each feedback is answered once.
+   */
+  private async notRight(feedback: Feedback): Promise<void> {
+    const { space_id: spaceId, message_id: messageId } = feedback;
+    const note = feedback.kind === "correction" ? text(feedback.text?.trim()) : undefined;
+    const asked = note !== undefined || (feedback.kind === "reaction" && feedback.reaction === "👎");
+    if (!asked || spaceId === undefined || text(messageId) === undefined || this.looked.has(feedback.id)) return;
+    this.looked.add(feedback.id);
+    const oldest = this.looked.values().next().value;
+    if (this.looked.size > LOOKS_KEPT && oldest !== undefined) this.looked.delete(oldest);
+    const context = await this.options.chips.roomContext(spaceId, { limit: 200 }).catch(() => undefined);
+    const said = context?.lines.find((line) => line.message_id === messageId);
+    const look = secondLook(feedback.from.display_name, text(said?.text), note);
+    // An id of its own, from the feedback's: never a real message's.
+    const message = {
+      type: "message.new",
+      space_id: spaceId,
+      message_id: `${feedback.id}:not-right`,
+      text: look.text,
+      from: feedback.from,
+      ...(said === undefined ? {} : { for: [said.from.id] }),
+    } as unknown as MessageNew;
+    await this.hear(message, look.goal);
   }
 
   /**
@@ -387,10 +431,10 @@ export class Bridge {
     }
   }
 
-  private async turn(room: Room, { message, speakerId }: Asked): Promise<void> {
+  private async turn(room: Room, { message, speakerId, goal }: Asked): Promise<void> {
     const { agent, spaceId } = room;
     const speaker = speakerId === undefined ? this.options.chips : this.options.chips.as(speakerId);
-    const run = await speaker.runs.start({ spaceId, goal: goalOf(message, agent.config.name) });
+    const run = await speaker.runs.start({ spaceId, goal: goal ?? goalOf(message, agent.config.name) });
     const text = promptFor(message, { ...(speakerId === undefined ? {} : { taker: speakerId }), sendsFiles: true });
     let sessionId: string;
     let given: string;
@@ -1103,6 +1147,27 @@ export function goalOf(message: MessageNew, name: string): string {
   const named = first.toLowerCase().startsWith(`@${name.toLowerCase()}`);
   const goal = named ? first.slice(name.length + 1).trim() : first.replace(/^@\S+\s*/, "");
   return (goal === "" ? `Answer ${message.from.display_name}` : goal).slice(0, 300);
+}
+
+/**
+ * A second look's words and its run's goal (Chips ADR 0200): the reply quoted where the room
+ * still has it, and what wasn't right, or, for a 👎 alone, that they didn't say. The goal is the
+ * note's first line, which the thinking bubble shows.
+ */
+export function secondLook(who: string, reply: string | undefined, note: string | undefined): { text: string; goal: string } {
+  const text = [
+    `${who} says your reply in this room wasn't right.`,
+    ...(reply === undefined ? [] : [`Your reply:\n«${cut(reply.trim(), REPLY_CHARS)}»`]),
+    note === undefined ? "They didn't say what. Read your reply again and find what was wrong." : `What wasn't right: «${note}»`,
+    "Look at it again and answer properly in its place. If it is not clear what was wrong, ask them in one short line. Say plainly what you changed.",
+  ].join("\n\n");
+  const first = note?.split("\n").find((line) => line.trim() !== "")?.trim();
+  return { text, goal: first === undefined ? "Looking again at its reply" : cut(`Looking again: ${first}`, 120) };
+}
+
+/** At most `most` characters, the last of them an ellipsis where it was cut. */
+function cut(words: string, most: number): string {
+  return words.length <= most ? words : `${words.slice(0, most - 1)}…`;
 }
 
 function lastLine(said: string): string {

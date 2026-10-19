@@ -8,6 +8,7 @@
  * - `fail` fails.
  * - `slow` writes for a while, unless interrupted.
  * - `drop` loses the event stream midway, and ends while nobody listens.
+ * - A second look after a person's Not right? (Chips ADR 0200) answers again.
  * - Anything else reads a file, says so, and answers.
  *
  * Words given while a session works wait in its inbox: `steer` ones are taken at its next step,
@@ -57,6 +58,9 @@ export interface Created {
 
 /** What the thinking model answers, once its thinking is over. */
 export const THOUGHTFUL = "Here it is:\n\n| Model | Score |\n|---|---|\n| A | 1 |";
+
+/** What a second look answers. */
+export const AGAIN = "You're right: Sunday it is. I read the dates again.";
 
 export interface FakeOpenCode {
   readonly url: string;
@@ -155,6 +159,8 @@ export async function startFakeOpenCode(
   };
 
   const play = async (session: FakeSession, words: string) => {
+    // Its last line says "ask them", which is not asking first.
+    if (words.startsWith("Look at it again")) return step(session, async (message) => say(session, message, AGAIN));
     if (options.askFirst === true || /\bask\b/.test(words)) {
       let decision: unknown;
       await step(session, async (message) => {
