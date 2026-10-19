@@ -141,6 +141,8 @@ interface Asked {
   readonly speakerId: string | undefined;
   /** What the run is called, where not the message's first line: a second look's (Chips ADR 0200). */
   readonly goal?: string | undefined;
+  /** Its words name who said them already, so nobody's name goes in front of them: a second look's. */
+  readonly saysWho?: boolean | undefined;
 }
 
 interface Room {
@@ -343,7 +345,7 @@ export class Bridge {
   // ------------------------------------------------------------------ what is said to it
 
   /** A message for some of its agents: each takes a turn in its room, one after another there. */
-  private async hear(message: MessageNew, goal?: string): Promise<void> {
+  private async hear(message: MessageNew, own: Pick<Asked, "goal" | "saysWho"> = {}): Promise<void> {
     const spaceId = message.space_id;
     if (spaceId === undefined) return;
     const harnessId = this.options.chips.harnessId;
@@ -351,7 +353,7 @@ export class Bridge {
       const agent = await this.runnerOf(taker);
       if (agent === undefined) continue;
       const room = this.roomOf(agent, taker, spaceId);
-      room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker, goal });
+      room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker, ...own });
       void this.pump(room);
     }
   }
@@ -383,7 +385,7 @@ export class Bridge {
       from: feedback.from,
       ...(said === undefined ? {} : { for: [said.from.id] }),
     } as unknown as MessageNew;
-    await this.hear(message, look.goal);
+    await this.hear(message, { goal: look.goal, saysWho: true });
   }
 
   /**
@@ -431,11 +433,15 @@ export class Bridge {
     }
   }
 
-  private async turn(room: Room, { message, speakerId, goal }: Asked): Promise<void> {
+  private async turn(room: Room, { message, speakerId, goal, saysWho }: Asked): Promise<void> {
     const { agent, spaceId } = room;
     const speaker = speakerId === undefined ? this.options.chips : this.options.chips.as(speakerId);
     const run = await speaker.runs.start({ spaceId, goal: goal ?? goalOf(message, agent.config.name) });
-    const text = promptFor(message, { ...(speakerId === undefined ? {} : { taker: speakerId }), sendsFiles: true });
+    const text = promptFor(message, {
+      ...(speakerId === undefined ? {} : { taker: speakerId }),
+      sayWho: saysWho !== true,
+      sendsFiles: true,
+    });
     let sessionId: string;
     let given: string;
     try {
