@@ -781,7 +781,10 @@ export class Bridge {
       .usage({
         scope: "step",
         model,
-        ...(prompt === undefined ? {} : { inputTokens: prompt }),
+        // Every token in, and how many of them the cache held (Chips ADR 0214).
+        ...(prompt === undefined
+          ? {}
+          : { inputTokens: prompt, cacheReadTokens: tokens?.cache.read, cacheWriteTokens: tokens?.cache.write }),
         ...(written === undefined ? {} : { outputTokens: written }),
         ...(cost === undefined || cost <= 0 ? {} : { costUsd: cost }),
       })

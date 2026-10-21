@@ -245,6 +245,7 @@ describe("a turn", () => {
       [usage.payload["model"], usage.payload["input_tokens"], usage.payload["output_tokens"], usage.payload["scope"]],
       ["nous/heron-2", 1200, 50, "step"],
     );
+    assert.deepEqual([usage.payload["cache_read_tokens"], usage.payload["cache_write_tokens"]], [200, 0]);
     assert.equal((usage.payload["cost"] as { usd: number }).usd, 0.0042);
     const context = await sent(chips, "context.usage");
     assert.deepEqual([context.payload["used_tokens"], context.payload["limit_tokens"]], [1250, 200_000]);
