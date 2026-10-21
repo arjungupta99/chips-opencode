@@ -459,9 +459,9 @@ describe("a person's Not right?", () => {
           `What wasn't right: «${NOTE.replace(/\./g, "\\.")}»\n\nLook at it again and answer properly in its place\\.`,
       ),
     );
-    assert.doesNotMatch(again?.text ?? "", /Arjun: /, "no name in front of words that say who");
+    assert.doesNotMatch(again?.text ?? "", /Arjun \(owner\): /, "no name in front of words that say who");
     const ordinary = opencode.prompts.find((each) => each.sessionId === again?.sessionId);
-    assert.match(ordinary?.text ?? "", /\n\nArjun: when do we fly home\?$/, "an ordinary turn's words still say who");
+    assert.match(ordinary?.text ?? "", /\n\nArjun \(owner\): when do we fly home\?$/, "an ordinary turn's words still say who");
     const posts = chips.workspace.log.filter((event) => event.type === "message.post" && event.run_id === started.run_id);
     assert.equal(posts.length, 1, "nothing said in the room but its answer");
   });
@@ -516,7 +516,7 @@ describe("a person's Not right?", () => {
     assert.equal((await reply(chips, started.run_id)).payload["text"], AGAIN);
     const again = opencode.prompts[0]?.text ?? "";
     assert.match(again, /(?:^|\n\n)Arjun says your reply in this room wasn't right\.\n\nWhat wasn't right: «Wrong facts\.»/);
-    assert.doesNotMatch(again, /Your reply:|Arjun: /);
+    assert.doesNotMatch(again, /Your reply:|Arjun \(owner\): /);
   });
 
   it("quotes at most 1500 characters of the reply, and calls the run by the note's first line, at most 120", () => {
