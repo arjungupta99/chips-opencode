@@ -46,6 +46,15 @@ Not yet:
 - OpenCode's models as the agent's Model group in Chips. Its commands, skills and context files.
 - More than one OpenCode server per bridge.
 
+## From Chips's gallery
+
+The card's line is `chips connect opencode '<link>'` (Chips ADR 0218). It downloads this bridge as the npm package
+`@chipschat/opencode`, the newest 1.x, checks it against the registry's checksum, and runs it on the Node
+that Chips carries, so the machine needs no Node or npm of its own. The bridge checks OpenCode,
+joins, and keeps itself running from login. `chips disconnect opencode` stops it. On another computer,
+`curl -fsSL https://chipschat.ai/install | sh -s -- connect opencode '<link>'` installs Chips there
+first. The steps below run the bridge from this checkout instead, to work on it.
+
 ## Run it
 
 1. Install OpenCode (opencode.ai), and `npm install` once in this repository.
@@ -103,4 +112,12 @@ The gallery's card for this connector, run as a person runs it, against a scratc
 Chips checkout (`CHIPS_REPO`, `~/Work/Chips/chips-main` unless set; skipped without one) and the same scripted OpenCode.
 Each thing not set up stops it with the link still good; then it joins with what the card grants,
 says hello once in its room, says nothing more started again, and takes up a new link in place of
-the key it kept. The scratch Chips, the link and the run come from Chips's `tools/connect-kit`.
+the key it kept. The scratch Chips, the link and the run come from Chips's `tools/connect-kit`, which packs this checkout and serves it from a stand-in npm registry, so the card's `chips connect` downloads, checks and runs what would be published.
+
+## Release
+
+`npm run release` builds `dist/main.js`, one file with the SDK and everything else bundled in, and
+`dist/THIRD-PARTY-NOTICES.md` beside it; runs the tests; and packs `chipschat-opencode-<version>.tgz`. `npm publish`
+publishes it. A version's major is the Chips protocol it speaks, and Chips's card names that major
+(Chips ADR 0218): a fix is a minor or a patch, and reaches every card of its major the day it is
+published.

@@ -91,7 +91,7 @@ const joined = await joinChips({
   link,
   url: process.env["CHIPS_URL"],
   name: config.name,
-  software: "chips-opencode 0.1.0",
+  software: "chips-opencode 1.0.0",
   wants: ["agents", "new_agents"],
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
 }).catch(refused);
@@ -107,7 +107,7 @@ const state: BridgeState = existsSync(statePath)
 const chips = await connect({
   url: joined.url,
   token: joined.token,
-  client: { name: "chips-opencode", version: "0.1.0" },
+  client: { name: "chips-opencode", version: "1.0.0" },
   store: fileStore(join(folder, "chips-state.json")),
 });
 
