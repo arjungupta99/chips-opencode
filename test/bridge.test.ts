@@ -154,6 +154,21 @@ describe("the room's project (Chips ADR 0221)", () => {
     assert.deepEqual(changed.payload["files"], [{ path: "notes.md", added: 1, removed: 0 }]);
   });
 
+  // On 23 October Hermes's log named the harness for Quill's push, signed by Quill, and this bridge had the same line.
+  it("names in its log the agent whose copy it is, as its commits are signed", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chips-opencode-project-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    const chips = await startFakeChips({ capabilities: ["agents", "new_agents"] });
+    open.push(() => chips.close());
+    const { lines } = await rig({ chips, folders: root, projects: true });
+    const room = await chips.openRoom("Plans");
+    const { askId } = await chips.askForAgent(room, "Nova");
+    await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId);
+    await chips.say("start the notes", room);
+    await sent(chips, "run.completed");
+    assert.ok(lines.includes("Nova's project: nothing to send"), lines.join("\n"));
+  });
+
   it("leaves sessions that work in the person's own project there, with no room project", async () => {
     const { chips, opencode } = await rig({ projects: true });
     await chips.say("look at my repo");

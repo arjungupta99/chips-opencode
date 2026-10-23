@@ -229,8 +229,8 @@ interface Turn {
   readonly allowed: Map<string, string>;
   /** Everything heard for the turn, in order. */
   chain: Promise<void>;
-  /** The agent's copy of the room's project, brought up to date as the turn began (Chips ADR 0221). */
-  readonly project: Project | undefined;
+  /** The agent's copy of the room's project, brought up to date as the turn began, and its name (Chips ADR 0221). */
+  readonly project: { readonly copy: Project; readonly name: string } | undefined;
 }
 
 export class Bridge {
@@ -600,7 +600,7 @@ export class Bridge {
       approvals: new Map(),
       allowed: new Map(),
       chain: Promise.resolve(),
-      project: readied?.project,
+      project: readied === undefined ? undefined : { copy: readied.copy, name: readied.name },
     };
     const held = this.early.get(sessionId) ?? [];
     this.early.delete(sessionId);
@@ -674,7 +674,7 @@ export class Bridge {
   private async projectFor(
     room: Room,
     agentId: string,
-  ): Promise<{ project: Project; facts: ProjectFacts } | undefined> {
+  ): Promise<{ copy: Project; name: string; facts: ProjectFacts } | undefined> {
     if (this.options.projects !== true) return undefined;
     const name = await this.nameOf(room);
     try {
@@ -687,7 +687,7 @@ export class Bridge {
         folder,
         log: (line) => this.log(line),
       });
-      return { project, facts: await project.pull() };
+      return { copy: project, name, facts: await project.pull() };
     } catch (error) {
       this.log(`${name}'s copy of the room's project couldn't be readied: ${messageOf(error)}`);
       return undefined;
@@ -697,10 +697,11 @@ export class Bridge {
   /** What the turn changed in its copy, sent to the room's project before its words are posted. */
   private async sendProject(turn: Turn, words: string): Promise<void> {
     if (turn.project === undefined) return;
+    const { copy, name } = turn.project;
     try {
-      this.log(`${turn.agent.config.name}'s project: ${pushedInWords(await turn.project.push({ words }))}`);
+      this.log(`${name}'s project: ${pushedInWords(await copy.push({ words }))}`);
     } catch (error) {
-      this.log(`${turn.agent.config.name}'s project couldn't be sent: ${messageOf(error)}`);
+      this.log(`${name}'s project couldn't be sent: ${messageOf(error)}`);
     }
   }
 
