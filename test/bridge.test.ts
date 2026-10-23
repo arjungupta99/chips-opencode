@@ -11,7 +11,19 @@ import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
 import { type Chips, connect, type Decision } from "@chipschat/harness";
 import { createIdGenerator } from "@chipschat/protocol";
-import { Bridge, type BridgeState, cardOf, decisionOf, freeFolder, keyOf, questionOf, secondLook, spoken } from "../src/bridge.ts";
+import {
+  Bridge,
+  type BridgeState,
+  cardOf,
+  decisionOf,
+  forkName,
+  freeFolder,
+  keyOf,
+  questionOf,
+  secondLook,
+  spoken,
+  WANTS,
+} from "../src/bridge.ts";
 import { OpenCodeClient } from "../src/opencode.ts";
 import { AGAIN, type FakeOpenCode, startFakeOpenCode, THOUGHTFUL } from "./fake-opencode.ts";
 
@@ -22,6 +34,8 @@ interface Rig {
   readonly opencode: FakeOpenCode;
   readonly state: BridgeState;
   readonly agentId: string;
+  /** What the bridge logged. */
+  readonly lines: string[];
 }
 
 const open: (() => Promise<void>)[] = [];
@@ -40,6 +54,7 @@ async function rig(
   open.push(() => opencode.close());
   const client = await connect({ url: chips.address.url, token: chips.address.token });
   const state = options.state ?? { sessions: {} };
+  const lines: string[] = [];
   const bridge = new Bridge({
     chips: client,
     opencode: new OpenCodeClient({ url: opencode.url, password: opencode.password, directory: options.directory }),
@@ -49,6 +64,7 @@ async function rig(
     saveState: () => undefined,
     healthEveryMs: 50,
     reconnectMs: 50,
+    log: (line) => lines.push(line),
     ...(options.folders === undefined ? {} : { folders: options.folders }),
   });
   open.push(async () => {
@@ -56,7 +72,7 @@ async function rig(
     client.close();
   });
   await bridge.start();
-  return { chips, client, bridge, opencode, state, agentId: bridge.mainAgentId ?? "" };
+  return { chips, client, bridge, opencode, state, agentId: bridge.mainAgentId ?? "", lines };
 }
 
 async function until(done: () => boolean, timeoutMs = 3000): Promise<void> {
@@ -81,14 +97,18 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * gave it (Chips ADR 0200). The fake's door has no `from` to fill in for one, so it goes in past it.
  */
 function feedback(chips: FakeChips, fields: Readonly<Record<string, unknown>>): void {
-  const workspace = chips.workspace as unknown as { appendSystem(event: Record<string, unknown>): StoredEvent };
   const { participantId, displayName } = chips.workspace.owner;
-  workspace.appendSystem({
+  appended(chips, {
     type: "feedback",
     space_id: chips.address.spaceId,
     from: { participant_id: participantId, kind: "person", display_name: displayName, role: "owner" },
     ...fields,
   });
+}
+
+/** An event in the fake's log past its door, which fills in what a person may not. */
+function appended(chips: FakeChips, event: Readonly<Record<string, unknown>>): StoredEvent {
+  return (chips.workspace as unknown as { appendSystem(event: Record<string, unknown>): StoredEvent }).appendSystem({ ...event });
 }
 
 /** The message an agent said in a room, as the room's lines name it. */
@@ -524,6 +544,149 @@ describe("a person's Not right?", () => {
     assert.equal(/«(a+…)»/.exec(look.text)?.[1]?.length, 1500);
     assert.equal(look.goal.length, 120);
     assert.match(look.goal, /^Looking again: b+…$/);
+  });
+});
+
+// Fork was offered for Jacobian's agents and ACP's, never OpenCode's (Chips ADR 0087).
+describe("a copy a person asks for (Chips ADR 0087, Fork)", () => {
+  /** Nova, an agent asked for in a room, of a harness that makes copies. */
+  async function withNova(options: { folders?: string } = {}) {
+    const chips = await startFakeChips({ capabilities: ["agents", "new_agents", "forks"] });
+    open.push(() => chips.close());
+    const made = await rig({ chips, ...options });
+    const room = await chips.openRoom("Trip");
+    const { askId } = await chips.askForAgent(room, "Nova");
+    await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId);
+    const nova = (await made.client.agents.list()).find((agent) => agent.name === "Nova")?.agentId ?? "";
+    return { ...made, room, nova };
+  }
+  const madeCopies = (lines: readonly string[]) => lines.filter((line) => line.includes(", a copy of Nova, made")).length;
+
+  it("is a copy in the room asked for, called after it, in its folder, that remembers what it heard", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chips-opencode-fork-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    const { chips, client, opencode, state, room, nova, lines } = await withNova({ folders: root });
+    await chips.say("when do we fly home?", room);
+    await sent(chips, "run.completed");
+    const original = state.sessions[`${nova}|${room}`];
+    const second = await chips.openRoom("Second opinion");
+    const { forkId } = await chips.askForFork(nova, second);
+    const joined = await sent(chips, "membership.added", (event) => event.payload["fork_of"] === forkId);
+    await until(() => madeCopies(lines) === 1);
+    const copy = (await client.agents.list()).find((agent) => agent.agentId === joined.payload["participant_id"]);
+    assert.deepEqual(
+      [copy?.key, copy?.name, copy?.forkedFrom, copy?.spaces],
+      [`opencode:fork:${forkId}`, "Nova · fork", nova, [second]],
+    );
+    const copied = state.sessions[`${copy?.agentId}|${second}`];
+    assert.deepEqual(opencode.forks, [{ from: original, to: copied }]);
+    assert.equal(state.folders?.[copy?.agentId ?? ""], join(root, "nova"), "the original's folder");
+    assert.equal(state.folders?.[nova], join(root, "nova"));
+    assert.deepEqual(opencode.updates, [
+      { sessionId: copied, title: `Chips room ${second}`, metadata: { chips_space: second, chips_agent: copy?.agentId } },
+    ]);
+    await chips.say("recall", second);
+    const started = await sent(chips, "run.started", (event) => event.space_id === second);
+    assert.equal(started.actor.id, copy?.agentId);
+    assert.equal((await reply(chips, started.run_id)).payload["text"], "First said here: Arjun (owner): when do we fly home?");
+    assert.equal(opencode.prompts.at(-1)?.sessionId, copied, "its copied session");
+    assert.equal(opencode.created.length, 1, "and no new one");
+  });
+
+  it("makes one copy of an ask, however often it is heard", async () => {
+    const { chips, client, opencode, state, room, nova, lines } = await withNova();
+    await chips.say("one", room);
+    await sent(chips, "run.completed");
+    const second = await chips.openRoom("Second opinion");
+    const { forkId } = await chips.askForFork(nova, second);
+    // The same ask again, as a replay brings it: at once, and once the copy is made.
+    const { seq: _seq, ...ask } = chips.workspace.log.find((event) => event.id === forkId)?.payload ?? {};
+    appended(chips, ask);
+    await until(() => madeCopies(lines) >= 1);
+    appended(chips, ask);
+    await until(() => madeCopies(lines) >= 2);
+    await sleep(150);
+    assert.equal(opencode.forks.length, 1, "one session copied");
+    const copies = (await client.agents.list()).filter((agent) => agent.forkedFrom === nova);
+    assert.equal(copies.length, 1, "one copy");
+    assert.deepEqual(Object.keys(state.forks ?? {}), [forkId]);
+    assert.equal(state.sessions[`${copies[0]?.agentId}|${second}`], opencode.forks[0]?.to);
+  });
+
+  it("takes the copy's turns in its own session and the original's in its own, each its own work", async () => {
+    const { chips, client, opencode, state, room, nova, lines } = await withNova();
+    await chips.say("when do we fly home?", room);
+    await sent(chips, "run.completed");
+    const second = await chips.openRoom("Second opinion");
+    await chips.askForFork(nova, second);
+    await until(() => madeCopies(lines) === 1);
+    const copy = (await client.agents.list()).find((agent) => agent.forkedFrom === nova)?.agentId ?? "";
+    const [mine, its] = [state.sessions[`${nova}|${room}`], state.sessions[`${copy}|${second}`]];
+    // The original works slowly while its copy answers beside it.
+    await chips.say("slow", room);
+    await until(() => opencode.prompts.length === 2);
+    await chips.say("recall", second);
+    await until(() => count(chips, "run.completed") === 3);
+    const runOf = (spaceId: string) =>
+      chips.workspace.log.findLast((event) => event.type === "run.started" && event.space_id === spaceId);
+    const [slow, recalled] = [runOf(room), runOf(second)];
+    assert.deepEqual([slow?.actor.id, recalled?.actor.id], [nova, copy]);
+    assert.equal((await reply(chips, slow?.run_id)).payload["text"], "Slowly done.");
+    assert.equal((await reply(chips, recalled?.run_id)).payload["text"], "First said here: Arjun (owner): when do we fly home?");
+    const usages = (runId: string | null | undefined) =>
+      chips.workspace.log.filter((event) => event.type === "usage" && event.run_id === runId).length;
+    assert.deepEqual([usages(slow?.run_id), usages(recalled?.run_id)], [1, 1], "each run's cost its own");
+    assert.deepEqual(
+      opencode.prompts.slice(1).map((each) => [each.sessionId, each.text.split("\n").at(-1)]),
+      [
+        [mine, "Arjun (owner): slow"],
+        [its, "Arjun (owner): recall"],
+      ],
+    );
+    assert.ok(!opencode.historyOf(mine ?? "").includes("Arjun (owner): recall"), "they remember apart");
+  });
+
+  it("copies an agent that never spoke as a new one, in the original's folder", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chips-opencode-fork-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    const { chips, client, opencode, state, nova, lines } = await withNova({ folders: root });
+    const second = await chips.openRoom("Second opinion");
+    await chips.askForFork(nova, second);
+    await until(() => madeCopies(lines) === 1);
+    assert.ok(lines.some((line) => line === "Nova never spoke in its room: its copy starts with nothing to remember"));
+    assert.deepEqual(opencode.forks, []);
+    const copy = (await client.agents.list()).find((agent) => agent.forkedFrom === nova)?.agentId ?? "";
+    assert.equal(state.folders?.[copy], join(root, "nova"));
+    await chips.say("hello", second);
+    await sent(chips, "run.completed");
+    assert.deepEqual(
+      opencode.created.map((each) => [each.location, (each.metadata as { chips_agent: string }).chips_agent]),
+      [[{ directory: join(root, "nova") }, copy]],
+    );
+  });
+
+  it("makes no copy of an agent not the harness's, nor for an ask its room stopped waiting for", async () => {
+    const { chips, client, opencode, state, nova, lines } = await withNova();
+    const before = await client.agents.list();
+    const by = chips.workspace.owner.participantId;
+    const actor = { kind: "person", id: by };
+    // An agent Chips has never had: none of its, nor any other harness's.
+    const stranger = createIdGenerator().next("agent");
+    appended(chips, { type: "agent.fork", actor, space_id: chips.address.spaceId, agent_id: stranger, by });
+    await until(() => lines.some((line) => line === `no copy of ${stranger} for ${chips.address.spaceId}: it isn't one of this harness's agents`));
+    const second = await chips.openRoom("Second opinion");
+    const ts = new Date(Date.now() - 2 * 60_000).toISOString();
+    appended(chips, { type: "agent.fork", actor, space_id: second, agent_id: nova, by, ts });
+    await until(() => lines.some((line) => line.endsWith("and the room has stopped waiting")));
+    assert.equal((await client.agents.list()).length, before.length);
+    assert.deepEqual(opencode.forks, []);
+    assert.equal(state.forks, undefined);
+  });
+
+  it("asks to make copies when it joins, and calls a copy after its original", () => {
+    assert.ok(WANTS.includes("forks"));
+    assert.equal(forkName("Nova"), "Nova · fork");
+    assert.equal(forkName("Nova · fork 2"), "Nova · fork");
   });
 });
 

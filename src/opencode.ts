@@ -59,6 +59,8 @@ export class OpenCodeError extends Error {
     message: string,
     readonly status: number,
     readonly tag?: string | undefined,
+    /** What kind of bad ask an `InvalidRequestError` is: `empty_session` for a fork of an empty session. */
+    readonly kind?: string | undefined,
   ) {
     super(message);
   }
@@ -137,6 +139,34 @@ export class OpenCodeClient {
     const id = (made["data"] as Record<string, unknown> | undefined)?.["id"];
     if (typeof id !== "string") throw new OpenCodeError("OpenCode made a session and named none", 502);
     return id;
+  }
+
+  /**
+   * A copy of a session (2.0.25): a new session that remembers what it does, but for an answer
+   * still being written or a shell still running, in the same folder, of the same agent and model,
+   * with its title, metadata and permissions. The copy
+   * is no sub-agent: OpenCode says so with `session.forked`, not `session.created`, and names the
+   * original there as `parentID`. A session with nothing in it is an `InvalidRequestError` of
+   * kind `empty_session`.
+   */
+  async fork(sessionId: string): Promise<{ readonly id: string; readonly metadata: Readonly<Record<string, unknown>> }> {
+    const made = await this.call("POST", `/api/session/${encodeURIComponent(sessionId)}/fork`, {});
+    const data = (made["data"] as Record<string, unknown> | undefined) ?? {};
+    const id = data["id"];
+    if (typeof id !== "string") throw new OpenCodeError("OpenCode copied a session and named no copy", 502);
+    const metadata = data["metadata"];
+    return { id, metadata: typeof metadata === "object" && metadata !== null ? (metadata as Record<string, unknown>) : {} };
+  }
+
+  /** A session's title, or its metadata, which this replaces whole. */
+  async update(
+    sessionId: string,
+    changes: { readonly title?: string | undefined; readonly metadata?: Readonly<Record<string, unknown>> | undefined },
+  ): Promise<void> {
+    await this.call("PATCH", `/api/session/${encodeURIComponent(sessionId)}`, {
+      ...(changes.title === undefined ? {} : { title: changes.title }),
+      ...(changes.metadata === undefined ? {} : { metadata: changes.metadata }),
+    });
   }
 
   /**
@@ -279,16 +309,18 @@ function eventOf(block: string): OpenCodeEvent | undefined {
   }
 }
 
-/** OpenCode's errors are `{ _tag, message }`. */
+/** OpenCode's errors are `{ _tag, message }`, and an `InvalidRequestError` says its `kind`. */
 async function failureOf(answer: Response): Promise<OpenCodeError> {
   let message = `OpenCode answered ${answer.status}`;
   let tag: string | undefined;
+  let kind: string | undefined;
   try {
-    const body = (await answer.json()) as { _tag?: string; message?: string };
+    const body = (await answer.json()) as { _tag?: string; message?: string; kind?: unknown };
     if (typeof body.message === "string" && body.message !== "") message = body.message;
     tag = body._tag;
+    if (typeof body.kind === "string") kind = body.kind;
   } catch {
     // Not JSON: the status says enough.
   }
-  return new OpenCodeError(message, answer.status, tag);
+  return new OpenCodeError(message, answer.status, tag, kind);
 }

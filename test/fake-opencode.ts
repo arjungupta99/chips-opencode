@@ -9,7 +9,12 @@
  * - `slow` writes for a while, unless interrupted.
  * - `drop` loses the event stream midway, and ends while nobody listens.
  * - A second look after a person's Not right? (Chips ADR 0200) answers again.
+ * - `recall` says the first words its session remembers, a copy's from its original's.
  * - Anything else reads a file, says so, and answers.
+ *
+ * A session is copied as OpenCode 2.0.25 copies one (`POST …/fork`): what it remembers, its
+ * folder, agent, title and metadata go to a new session, announced by `session.forked`, which
+ * names the original as `parentID`. A session with nothing in it is refused.
  *
  * Words given while a session works wait in its inbox: `steer` ones are taken at its next step,
  * the rest when it is done. An interrupt parks what waited; words given after it start afresh.
@@ -34,6 +39,10 @@ interface FakeSession {
   readonly inbox: Item[];
   /** The folder it was made to work in, when it was given one. */
   readonly directory?: string;
+  title?: unknown;
+  metadata?: unknown;
+  /** What it remembers: each person's words it took, and each answer, in order. */
+  readonly history: string[];
   busy: boolean;
   interrupted: boolean;
   outcome?: string;
@@ -62,10 +71,19 @@ export const THOUGHTFUL = "Here it is:\n\n| Model | Score |\n|---|---|\n| A | 1 
 /** What a second look answers. */
 export const AGAIN = "You're right: Sunday it is. I read the dates again.";
 
+/** A session's copy: the session copied, and the copy. */
+export interface Forked {
+  readonly from: string;
+  readonly to: string;
+}
+
 export interface FakeOpenCode {
   readonly url: string;
   readonly password: string;
   readonly created: Created[];
+  readonly forks: Forked[];
+  /** Each change a session's title or metadata was given. */
+  readonly updates: { sessionId: string; title: unknown; metadata: unknown }[];
   readonly prompts: Prompted[];
   readonly permissionReplies: { requestId: string; decision: unknown; message: unknown }[];
   readonly formReplies: { formId: string; answer: unknown }[];
@@ -74,6 +92,8 @@ export interface FakeOpenCode {
   up: boolean;
   /** A session OpenCode no longer has. */
   forget(sessionId: string): void;
+  /** What a session remembers. */
+  historyOf(sessionId: string): readonly string[];
   close(): Promise<void>;
 }
 
@@ -94,9 +114,11 @@ export async function startFakeOpenCode(
   let count = 0;
   let deaf = false;
   const next = (prefix: string) => `${prefix}_${(count += 1)}`;
-  const fake: Omit<FakeOpenCode, "url" | "close" | "forget"> = {
+  const fake: Omit<FakeOpenCode, "url" | "close" | "forget" | "historyOf"> = {
     password,
     created: [],
+    forks: [],
+    updates: [],
     prompts: [],
     permissionReplies: [],
     formReplies: [],
@@ -122,6 +144,7 @@ export async function startFakeOpenCode(
   };
   const say = (session: FakeSession, message: string, text: string) => {
     session.last = text;
+    session.history.push(text);
     emit("session.text.started", { sessionID: session.id, assistantMessageID: message, ordinal: 0 });
     emit("session.text.ended", { sessionID: session.id, assistantMessageID: message, ordinal: 0, text });
   };
@@ -161,6 +184,9 @@ export async function startFakeOpenCode(
   const play = async (session: FakeSession, words: string) => {
     // Its last line says "ask them", which is not asking first.
     if (words.startsWith("Look at it again")) return step(session, async (message) => say(session, message, AGAIN));
+    if (/\brecall\b/.test(words)) {
+      return step(session, async (message) => say(session, message, `First said here: ${session.history[0] ?? "nothing"}`));
+    }
     if (options.askFirst === true || /\bask\b/.test(words)) {
       let decision: unknown;
       await step(session, async (message) => {
@@ -227,7 +253,7 @@ export async function startFakeOpenCode(
     if (/\bdelegate\b/.test(words)) {
       await step(session, async (message) => {
         tool(session, message, "call_9", "subagent", { agent: "general", description: "Find three quotes", prompt: "Find three quotes." });
-        const child: FakeSession = { id: next("ses"), agent: "general", parentID: session.id, inbox: [], busy: true, interrupted: false, last: "" };
+        const child: FakeSession = { id: next("ses"), agent: "general", parentID: session.id, inbox: [], history: [], busy: true, interrupted: false, last: "" };
         sessions.set(child.id, child);
         emit("session.created", { sessionID: child.id, parentID: session.id, projectID: "prj_1", slug: "child", version: "2.0.29" });
         await step(child, async (inner) => say(child, inner, "Three quotes."), { providerID: "nous", id: "heron-mini" });
@@ -262,9 +288,11 @@ export async function startFakeOpenCode(
     for (let item = session.inbox.find((each) => !each.parked); item !== undefined; item = session.inbox.find((each) => !each.parked)) {
       session.inbox.splice(session.inbox.indexOf(item), 1);
       emit("session.inbox.delivered", { sessionID: session.id, inboxID: item.id });
+      // The person's words, the text's last line: not the room note before them, which may say "ask".
+      const words = item.text.split("\n").at(-1) ?? "";
+      session.history.push(words);
       try {
-        // The person's words, the text's last line: not the room note before them, which may say "ask".
-        await play(session, item.text.split("\n").at(-1) ?? "");
+        await play(session, words);
       } catch (error) {
         failed = String((error as Error).message);
         break;
@@ -353,6 +381,9 @@ export async function startFakeOpenCode(
           agent: String(body["agent"] ?? "build"),
           inbox: [],
           ...(typeof own === "string" ? { directory: own } : {}),
+          title: body["title"],
+          metadata: body["metadata"],
+          history: [],
           busy: false,
           interrupted: false,
           last: "",
@@ -367,13 +398,57 @@ export async function startFakeOpenCode(
       if (session === undefined) return missing(response, route[1] ?? "");
       const rest = route[2];
       if (method === "GET" && rest === undefined) {
-        return json(response, 200, { data: { id: session.id, outcome: session.outcome, location: { directory: session.directory ?? directory } } });
+        return json(response, 200, {
+          data: { id: session.id, outcome: session.outcome, title: session.title, metadata: session.metadata, location: { directory: session.directory ?? directory } },
+        });
       }
       if (method === "GET" && rest === "inbox") return json(response, 200, { data: session.inbox.map((item) => ({ id: item.id })) });
       if (method === "GET" && rest === "message") {
         return json(response, 200, { data: [{ type: "assistant", content: [{ type: "text", text: session.last }] }], cursor: {} });
       }
       const body = method === "DELETE" ? {} : await bodyOf(request);
+      if (method === "PATCH" && rest === undefined) {
+        fake.updates.push({ sessionId: session.id, title: body["title"], metadata: body["metadata"] });
+        if ("title" in body) session.title = body["title"];
+        if ("metadata" in body) session.metadata = body["metadata"];
+        return json(response, 204);
+      }
+      if (method === "POST" && rest === "fork") {
+        if (session.history.length === 0) {
+          return json(response, 400, { _tag: "InvalidRequestError", message: `Cannot fork empty session: ${session.id}`, kind: "empty_session" });
+        }
+        const id = next("ses");
+        const title = typeof session.title === "string" ? `${session.title} (fork #1)` : undefined;
+        sessions.set(id, {
+          id,
+          agent: session.agent,
+          inbox: [],
+          ...(session.directory === undefined ? {} : { directory: session.directory }),
+          title,
+          metadata: session.metadata,
+          history: [...session.history],
+          busy: false,
+          interrupted: false,
+          last: "",
+        });
+        fake.forks.push({ from: session.id, to: id });
+        const boundary = { type: "through", messageID: next("msg") };
+        emit("session.forked", { sessionID: id, parentID: session.id, boundary });
+        return json(response, 200, {
+          data: {
+            id,
+            fork: { sessionID: session.id, boundary },
+            projectID: "prj_1",
+            agent: session.agent,
+            cost: 0,
+            tokens,
+            time: { created: 0, updated: 0 },
+            title,
+            metadata: session.metadata,
+            location: { directory: session.directory ?? directory },
+          },
+        });
+      }
       if (method === "POST" && rest === "prompt") {
         const item: Item = { id: next("msg"), text: String(body["text"]), delivery: typeof body["delivery"] === "string" ? body["delivery"] : undefined, parked: false };
         fake.prompts.push({ sessionId: session.id, text: item.text, delivery: item.delivery });
@@ -433,6 +508,7 @@ export async function startFakeOpenCode(
   return Object.assign(fake, {
     url: `http://127.0.0.1:${port}`,
     forget: (sessionId: string) => void sessions.delete(sessionId),
+    historyOf: (sessionId: string) => [...(sessions.get(sessionId)?.history ?? [])],
     close: async () => {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));

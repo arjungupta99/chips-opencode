@@ -21,13 +21,25 @@
  *
  * A person's Not right? on an agent's message (Chips ADR 0200) is a run too: the agent who said
  * it looks again, in its session for the room, and its answer goes in the reply's place.
+ *
+ * A person's Fork (Chips ADR 0087) is a copy of an agent in another room: its session in its room,
+ * copied in OpenCode, is the copy's session there, in the original's folder. From then on the two
+ * remember apart.
  */
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Agent, ApprovalInput, Chips, Decision, Run, Speaker } from "@chipschat/harness";
 import { promptFor, sendAnswer } from "@chipschat/harness";
-import { type AgentAsked, createIdGenerator, type Feedback, type MessageNew, type StepKind } from "@chipschat/protocol";
+import {
+  type AgentAsked,
+  type AgentFork,
+  createIdGenerator,
+  FORK_WAIT_MS,
+  type Feedback,
+  type MessageNew,
+  type StepKind,
+} from "@chipschat/protocol";
 import {
   type FormAnswer,
   type ModelRef,
@@ -56,7 +68,20 @@ export interface BridgeState {
   sessions: Record<string, string>;
   /** Each agent's own folder, by whose sessions they are (`Room.who`), made the first time it is needed. */
   folders?: Record<string, string>;
+  /**
+   * The copies made for a person's Fork, by the ask's id: the session copied for it, where the
+   * original had one, and the folder it works in. Kept before the copy is registered, so an ask
+   * heard again copies nothing more.
+   */
+  forks?: Record<string, { readonly session?: string; readonly folder?: string }>;
 }
+
+/**
+ * What the harness asks Chips to let it do, when it joins with a code: have agents of its own
+ * (Chips ADR 0087), make a new one a person asks for in a room (ADR 0108), and copy one for a
+ * person's Fork. A link carries what the person chose instead.
+ */
+export const WANTS = ["agents", "new_agents", "forks"] as const;
 
 export interface BridgeOptions {
   readonly chips: Chips;
@@ -221,6 +246,8 @@ export class Bridge {
   private ours = new Set<string>();
   /** The feedbacks a second look was asked for, by their ids, the newest `LOOKS_KEPT`. */
   private readonly looked = new Set<string>();
+  /** Copies being made, by the Fork they answer: a room's first session waits for them. */
+  private readonly copying = new Map<string, Promise<void>>();
   private readonly log: (line: string) => void;
   private health: ReturnType<typeof setInterval> | undefined;
   private readonly listening = new AbortController();
@@ -246,6 +273,9 @@ export class Bridge {
     chips.on("message.new", (message) => void this.hear(message));
     chips.on("agent.asked", (asked) => {
       this.make(asked).catch((error: unknown) => this.log(`a new agent went wrong: ${messageOf(error)}`));
+    });
+    chips.on("agent.fork", (fork) => {
+      this.copy(fork).catch((error: unknown) => this.log(`a copy went wrong: ${messageOf(error)}`));
     });
     chips.on("feedback", (feedback) => {
       this.notRight(feedback).catch((error: unknown) => this.log(`a second look went wrong: ${messageOf(error)}`));
@@ -340,6 +370,93 @@ export class Bridge {
     });
     this.ours.add(agent.agentId);
     this.log(`${agent.name} made${agent.attached === false ? `, not in the room: ${agent.why ?? "too late"}` : ""}`);
+  }
+
+  /** A person's Fork, made once however often it is heard at a time. */
+  private copy(fork: AgentFork): Promise<void> {
+    const going = this.copying.get(fork.id);
+    if (going !== undefined) return going;
+    const made = this.makeCopy(fork).finally(() => this.copying.delete(fork.id));
+    this.copying.set(fork.id, made);
+    return made;
+  }
+
+  /**
+   * A person asked for a copy of one of its agents in another room (Chips ADR 0087, Fork). The
+   * agent's session in the room it is in is copied in OpenCode, renamed and marked for the room
+   * and the copy, and is the copy's session there. The copy works in the original's folder and is
+   * keyed by the ask, which keeps what it copied before the copy is registered, so an ask heard
+   * again registers the same copy and copies nothing more. An agent that never spoke in its room
+   * has nothing to copy: its copy starts a session of its own there, in the same folder. An agent
+   * that isn't one of the harness's has no copy, nor has an ask the room stopped waiting for.
+   */
+  private async makeCopy(fork: AgentFork): Promise<void> {
+    const { chips, opencode, state, saveState } = this.options;
+    const spaceId = fork.space_id;
+    if (spaceId === undefined) return;
+    const late = Date.now() - Date.parse(fork.ts);
+    if (late >= FORK_WAIT_MS) {
+      this.log(`no copy of ${fork.agent_id} for ${spaceId}: asked ${Math.round(late / 1000)} s ago, and the room has stopped waiting`);
+      return;
+    }
+    const agent = await this.runnerOf(fork.agent_id);
+    if (agent === undefined) {
+      this.log(`no copy of ${fork.agent_id} for ${spaceId}: it isn't one of this harness's agents`);
+      return;
+    }
+    // Whose its sessions are, as `roomOf` says: the key of one configured here, else its Chips id.
+    const who = fork.agent_id === agent.agentId ? agent.key : fork.agent_id;
+    const original = (await chips.agents.list().catch(() => [])).find((each) => each.agentId === fork.agent_id);
+    const name = original?.name ?? agent.config.name;
+    let kept = state.forks?.[fork.id];
+    let copied: Awaited<ReturnType<OpenCodeClient["fork"]>> | undefined;
+    if (kept === undefined) {
+      const from = this.sessionToCopy(who, original?.room);
+      if (from === undefined) this.log(`${name} never spoke in its room: its copy starts with nothing to remember`);
+      else {
+        copied = await opencode.fork(from).catch((error: unknown) => {
+          if (!nothingToCopy(error)) throw error;
+          this.log(`${name}'s session has nothing in OpenCode to copy: its copy starts with nothing to remember`);
+          return undefined;
+        });
+      }
+      const folder = await this.folderFor({ who, agent });
+      kept = { ...(copied === undefined ? {} : { session: copied.id }), ...(folder === undefined ? {} : { folder }) };
+      state.forks = { ...state.forks, [fork.id]: kept };
+      saveState(state);
+    }
+    const copy = await chips.agents.register({
+      key: `opencode:fork:${fork.id}`,
+      name: forkName(name),
+      forkedFrom: fork.agent_id,
+      spaceId,
+    });
+    // Saved before anything else is heard; a room's first session waits for the copy besides.
+    this.ours.add(copy.agentId);
+    if (kept.session !== undefined) state.sessions[`${copy.agentId}|${spaceId}`] = kept.session;
+    if (kept.folder !== undefined) state.folders = { ...state.folders, [copy.agentId]: kept.folder };
+    saveState(state);
+    if (copied !== undefined) {
+      // The copy came with the original's room and name: it is called and marked for its own.
+      await opencode
+        .update(copied.id, {
+          title: `Chips room ${spaceId}`,
+          metadata: { ...copied.metadata, chips_space: spaceId, chips_agent: copy.agentId },
+        })
+        .catch((error: unknown) => this.log(`${copy.name}'s session keeps ${name}'s title: ${messageOf(error)}`));
+    }
+    this.log(
+      `${copy.name}, a copy of ${name}, made${kept.session === undefined ? " new" : ` from ${kept.session}`}` +
+        // Not in the room, and no why: it is there already, from the ask heard before.
+        `${copy.attached === false && copy.why !== undefined ? `; not in the room: ${copy.why}` : ""}`,
+    );
+  }
+
+  /** The session of an agent's to copy: its room's, or where it is in none, the last it had. */
+  private sessionToCopy(who: string, room: string | null | undefined): string | undefined {
+    const { sessions } = this.options.state;
+    if (room !== undefined && room !== null) return sessions[`${who}|${room}`];
+    return Object.entries(sessions).findLast(([id]) => id.startsWith(`${who}|`))?.[1];
   }
 
   // ------------------------------------------------------------------ what is said to it
@@ -493,7 +610,12 @@ export class Bridge {
   /** The words into the room's session: the one it had, or a new one when OpenCode no longer has it. */
   private async give({ id, who, agent, spaceId }: Room, text: string): Promise<{ sessionId: string; given: string }> {
     const { opencode, state, saveState } = this.options;
-    const kept = state.sessions[id];
+    let kept = state.sessions[id];
+    // A copy's session is saved once Chips has it: its first words wait, not to start a blank one.
+    if (kept === undefined && this.copying.size > 0) {
+      await Promise.allSettled(this.copying.values());
+      kept = state.sessions[id];
+    }
     if (kept !== undefined) {
       try {
         return { sessionId: kept, given: await this.prompted(kept, text) };
@@ -506,7 +628,7 @@ export class Bridge {
       title: `Chips room ${spaceId}`,
       agent: agent.config.agent,
       model: agent.model,
-      directory: await this.folderFor({ id, who, agent, spaceId } as Room),
+      directory: await this.folderFor({ who, agent }),
       metadata: { chips_space: spaceId, chips_agent: who },
     });
     state.sessions[id] = made;
@@ -518,7 +640,7 @@ export class Bridge {
    * The folder an agent's new sessions work in, its own: made the first time, named after it, and
    * kept by whose it is, so a rename doesn't move it. None without `folders`: the project's.
    */
-  private async folderFor({ who, agent }: Room): Promise<string | undefined> {
+  private async folderFor({ who, agent }: Pick<Room, "who" | "agent">): Promise<string | undefined> {
     const { folders: root, state, saveState } = this.options;
     if (root === undefined) return undefined;
     let folder = state.folders?.[who];
@@ -601,6 +723,8 @@ export class Bridge {
       if (parent !== undefined && this.rootOf(parent) !== undefined) this.parents.set(sessionId, parent);
       return;
     }
+    // A copy names its original as `parentID` here, and is no sub-agent of it: nothing it does is the original's.
+    if (event.type === "session.forked") return;
     const own = this.turns.get(sessionId);
     if (own === undefined && this.early.has(sessionId)) {
       this.early.get(sessionId)?.push(event);
@@ -1107,6 +1231,16 @@ export function spoken(words: string): string {
 }
 
 const THOUGHT_ENDS = "</think>";
+
+/** A copy's name, as Jacobian names its forks: `Nova · fork`, which Chips numbers when it is taken. */
+export function forkName(original: string): string {
+  return `${original.trim().replace(/ · fork( \d+)?$/, "")} · fork`;
+}
+
+/** Whether a fork failed for want of anything to copy: an empty session, or one OpenCode no longer has. */
+function nothingToCopy(error: unknown): boolean {
+  return error instanceof OpenCodeError && (error.kind === "empty_session" || error.tag === "SessionNotFoundError");
+}
 
 function lastWordsOf(words: Turn["words"]): string {
   const last = words.at(-1);
