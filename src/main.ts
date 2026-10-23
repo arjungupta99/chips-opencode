@@ -21,7 +21,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
+import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
 import { Bridge, type BridgeState, WANTS } from "./bridge.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { OpenCodeClient } from "./opencode.js";
@@ -123,9 +123,14 @@ const chips = await connect({
   store: fileStore(join(folder, "chips-state.json")),
 });
 
+// Each agent works on its room's project in a copy of its own (Chips ADR 0221), where git will.
+const git = await checkGit();
+if (!git.ok) log(`rooms' projects are off: ${git.why}`);
+
 const bridge = new Bridge({
   chips,
   opencode,
+  projects: git.ok,
   agents: config.agents,
   home: joined.spaceId,
   state,

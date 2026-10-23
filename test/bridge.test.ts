@@ -46,7 +46,15 @@ afterEach(async () => {
 const AGENT = { name: "OpenCode", agent: "build" } as const;
 
 async function rig(
-  options: { state?: BridgeState; model?: string; directory?: string; chips?: FakeChips; folder?: string; folders?: string } = {},
+  options: {
+    state?: BridgeState;
+    model?: string;
+    directory?: string;
+    chips?: FakeChips;
+    folder?: string;
+    folders?: string;
+    projects?: boolean;
+  } = {},
 ): Promise<Rig> {
   const chips = options.chips ?? (await startFakeChips({ capabilities: ["agents"] }));
   if (options.chips === undefined) open.push(() => chips.close());
@@ -66,6 +74,7 @@ async function rig(
     reconnectMs: 50,
     log: (line) => lines.push(line),
     ...(options.folders === undefined ? {} : { folders: options.folders }),
+    ...(options.projects === undefined ? {} : { projects: options.projects }),
   });
   open.push(async () => {
     bridge.stop();
@@ -120,6 +129,39 @@ async function saidBy(client: Chips, spaceId: string, agentId: string): Promise<
 const count = (chips: FakeChips, type: string) => chips.workspace.log.filter((event) => event.type === type).length;
 
 // Its Main agent was "OpenCode 2" beside the "OpenCode" Chips made at the join (Chips ON-10).
+
+describe("the room's project (Chips ADR 0221)", () => {
+  it("hands the agent its copy in its folder, and sends what it left there with its next turn", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chips-opencode-project-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    const { chips, opencode, agentId, lines } = await rig({ folders: root, projects: true });
+    await chips.say("start the notes");
+    await sent(chips, "run.completed");
+    const copy = join(root, "opencode", "room");
+    assert.ok(
+      (opencode.prompts[0]?.text ?? "").includes(
+        `The room's project is a git repository. Your copy is ${copy} (0 files), brought up to date just now.`,
+      ),
+      "told where its copy is",
+    );
+    assert.ok(lines.includes("OpenCode's project: nothing to send"), lines.join("\n"));
+
+    // The turn that wrote this stopped before it could send it: the next one takes it.
+    writeFileSync(join(copy, "notes.md"), "One sentence.\n");
+    await chips.say("go on");
+    const changed = await sent(chips, "project.changed");
+    assert.equal(changed.payload["by"], agentId);
+    assert.deepEqual(changed.payload["files"], [{ path: "notes.md", added: 1, removed: 0 }]);
+  });
+
+  it("leaves sessions that work in the person's own project there, with no room project", async () => {
+    const { chips, opencode } = await rig({ projects: true });
+    await chips.say("look at my repo");
+    await sent(chips, "run.completed");
+    assert.doesNotMatch(opencode.prompts[0]?.text ?? "", /The room's project/);
+  });
+});
+
 describe("its Main agent (Chips ADR 0183)", () => {
   it("is the agent Chips made at the join, called what its config says, with no second", async () => {
     const chips = await startFakeChips({ capabilities: ["agents"], harnessName: AGENT.name });

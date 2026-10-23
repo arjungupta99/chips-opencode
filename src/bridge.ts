@@ -29,8 +29,8 @@
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { Agent, ApprovalInput, Chips, Decision, Run, Speaker } from "@chipschat/harness";
-import { promptFor, sendAnswer } from "@chipschat/harness";
+import type { Agent, ApprovalInput, Chips, Decision, Project, Run, Speaker } from "@chipschat/harness";
+import { promptFor, pushedInWords, sendAnswer } from "@chipschat/harness";
 import {
   type AgentAsked,
   type AgentFork,
@@ -38,6 +38,7 @@ import {
   FORK_WAIT_MS,
   type Feedback,
   type MessageNew,
+  type ProjectFacts,
   type StepKind,
 } from "@chipschat/protocol";
 import {
@@ -97,6 +98,12 @@ export interface BridgeOptions {
    * it every session works in the project: the config's `directory`, else the server's own.
    */
   readonly folders?: string | undefined;
+  /**
+   * Whether each agent works on its room's project in a copy in its own folder (Chips ADR 0221):
+   * true when this machine has a git new enough. Only with `folders`: sessions that work in the
+   * person's own project work there as they always have.
+   */
+  readonly projects?: boolean | undefined;
   /** How often the server is asked whether it is up. */
   readonly healthEveryMs?: number | undefined;
   /** How long after the event stream drops it is opened again, at first. */
@@ -222,6 +229,8 @@ interface Turn {
   readonly allowed: Map<string, string>;
   /** Everything heard for the turn, in order. */
   chain: Promise<void>;
+  /** The agent's copy of the room's project, brought up to date as the turn began (Chips ADR 0221). */
+  readonly project: Project | undefined;
 }
 
 export class Bridge {
@@ -554,10 +563,12 @@ export class Bridge {
     const { agent, spaceId } = room;
     const speaker = speakerId === undefined ? this.options.chips : this.options.chips.as(speakerId);
     const run = await speaker.runs.start({ spaceId, goal: goal ?? goalOf(message, agent.config.name) });
+    const readied = await this.projectFor(room, speakerId ?? agent.agentId);
     const text = promptFor(message, {
       ...(speakerId === undefined ? {} : { taker: speakerId }),
       sayWho: saysWho !== true,
       sendsFiles: true,
+      project: readied?.facts,
     });
     let sessionId: string;
     let given: string;
@@ -589,6 +600,7 @@ export class Bridge {
       approvals: new Map(),
       allowed: new Map(),
       chain: Promise.resolve(),
+      project: readied?.project,
     };
     const held = this.early.get(sessionId) ?? [];
     this.early.delete(sessionId);
@@ -645,16 +657,58 @@ export class Bridge {
     if (root === undefined) return undefined;
     let folder = state.folders?.[who];
     if (folder === undefined) {
-      const name =
-        who === agent.key
-          ? agent.config.name
-          : ((await this.options.chips.agents.list().catch(() => [])).find((each) => each.agentId === who)?.name ?? "agent");
+      const name = await this.nameOf({ who, agent });
       folder = freeFolder(root, name, Object.values(state.folders ?? {}));
       state.folders = { ...state.folders, [who]: folder };
       saveState(state);
     }
     mkdirSync(folder, { recursive: true });
     return folder;
+  }
+
+  /**
+   * The room's project for a turn (Chips ADR 0221): the agent's copy in its own folder, brought up
+   * to date, and what the turn is told of it. None without `folders`, nor where this machine has no
+   * git for it.
+   */
+  private async projectFor(
+    room: Room,
+    agentId: string,
+  ): Promise<{ project: Project; facts: ProjectFacts } | undefined> {
+    if (this.options.projects !== true) return undefined;
+    const name = await this.nameOf(room);
+    try {
+      const folder = await this.folderFor(room);
+      if (folder === undefined) return undefined;
+      const project = this.options.chips.project({
+        spaceId: room.spaceId,
+        agentId,
+        name,
+        folder,
+        log: (line) => this.log(line),
+      });
+      return { project, facts: await project.pull() };
+    } catch (error) {
+      this.log(`${name}'s copy of the room's project couldn't be readied: ${messageOf(error)}`);
+      return undefined;
+    }
+  }
+
+  /** What the turn changed in its copy, sent to the room's project before its words are posted. */
+  private async sendProject(turn: Turn, words: string): Promise<void> {
+    if (turn.project === undefined) return;
+    try {
+      this.log(`${turn.agent.config.name}'s project: ${pushedInWords(await turn.project.push({ words }))}`);
+    } catch (error) {
+      this.log(`${turn.agent.config.name}'s project couldn't be sent: ${messageOf(error)}`);
+    }
+  }
+
+  /** Whose session a room's is, by name: the configured agent's, or one Chips knows of. */
+  private async nameOf({ who, agent }: Pick<Room, "who" | "agent">): Promise<string> {
+    if (who === agent.key) return agent.config.name;
+    const known = await this.options.chips.agents.list().catch(() => []);
+    return known.find((each) => each.agentId === who)?.name ?? "agent";
   }
 
   /** A turn's first words into a session, what it says meanwhile held for the turn. */
@@ -1053,6 +1107,7 @@ export class Bridge {
     }
     turn.allowed.clear();
     const answer = spoken(turn.recovered ?? lastWordsOf(turn.words)).trim();
+    await this.sendProject(turn, answer);
     // The files its `MEDIA:` lines name go with its words, from its session's folder (Chips TT-7).
     const folder = await this.folderOf(turn.sessionId);
     const { chips } = this.options;
