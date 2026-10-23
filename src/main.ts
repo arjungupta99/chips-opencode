@@ -21,12 +21,12 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { connect, fileStore, helloOnce, JoinError, join as joinChips } from "@chipschat/harness";
+import { connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
 import { Bridge, type BridgeState } from "./bridge.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { OpenCodeClient } from "./opencode.js";
 import { type OwnServer, ownServer, ServerError } from "./server.js";
-import { type Config, checkOpenCode, readConfig, SetupError, STILL_GOOD } from "./setup.js";
+import { type Config, checkOpenCode, hostOf, readConfig, SetupError, STILL_GOOD } from "./setup.js";
 
 const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 const link = process.env["CHIPS_JOIN_LINK"] || undefined;
@@ -37,6 +37,8 @@ const configPath = resolve(home(words[0] ?? "~/.chips-opencode/config.json"));
 const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
 const stop = (error: unknown): never => {
   if (!(error instanceof SetupError)) throw error;
+  // Where it stopped, in a few words for Chips for Mac's sheet; the whole sentence for a terminal.
+  reportStep("failed", error.words);
   process.stderr.write(`${error.message}\n`);
   process.exit(1);
 };
@@ -52,6 +54,7 @@ const statePath = join(folder, "sessions.json");
 
 // Nobody's own server named: the bridge runs one, and stops it when it stops.
 let server: OwnServer | undefined;
+if (link !== undefined) reportStep("checking", { detail: "Looking for OpenCode" });
 if (config.ownServer) {
   const cwd = config.directory ?? dirname(config.folders);
   mkdirSync(cwd, { recursive: true });
@@ -59,7 +62,13 @@ if (config.ownServer) {
     server = await ownServer({ folder, cwd, log });
   } catch (error) {
     if (!(error instanceof ServerError)) throw error;
-    stop(new SetupError(link === undefined ? error.message : `${error.message} ${STILL_GOOD}`));
+    stop(
+      new SetupError(link === undefined ? error.message : `${error.message} ${STILL_GOOD}`, {
+        detail: error.missing ? "OpenCode isn't on this Mac" : "Its server didn't start",
+        says: error.missing ? "OpenCode isn't installed here." : "OpenCode's server didn't start.",
+        doing: error.missing ? "Install OpenCode (opencode.ai), then try again." : error.message,
+      }),
+    );
   }
 }
 // However this process ends, a failed join included, the server it started ends with it.
@@ -69,7 +78,10 @@ const opencode = new OpenCodeClient({ url: address.url, password: address.passwo
 // With a link, which works once, OpenCode answers before it is taken up; after that, a bridge
 // started before OpenCode takes its agents as configured and says so.
 const offered = link !== undefined
-  ? await checkOpenCode(config, opencode).catch(stop)
+  ? await checkOpenCode(config, opencode).then((agents) => {
+      reportStep("checked", { detail: `Its server answers at ${hostOf(address.url)}` });
+      return agents;
+    }, stop)
   : await opencode.agents().catch((error: unknown) => {
       log(`OpenCode isn't answering at ${address.url} yet (${String(error)}): its agents are taken as configured`);
       return undefined;

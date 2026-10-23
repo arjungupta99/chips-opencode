@@ -50,6 +50,22 @@ describe("before the link is taken up", () => {
     const offered = await checkOpenCode(read, { agents: async () => [{ id: "build" }] as never });
     assert.equal(offered.length, 1);
   });
+  // Chips for Mac's sheet (Chips ADR 0218, phase 5): a few words under the step, the sentence,
+  // what to do, and a line to copy; the terminal keeps the whole sentence.
+  it("says where it stopped in a few words for Chips for Mac's sheet", async () => {
+    const read = readConfig(none, { OPENCODE_PASSWORD: "hunter22" });
+    const stopped = await checkOpenCode(read, { agents: () => Promise.reject(new TypeError("fetch failed")) }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    assert.ok(stopped instanceof SetupError);
+    assert.deepEqual(stopped.words, {
+      detail: "Nothing answers at 127.0.0.1:4096",
+      says: "OpenCode's server isn't answering.",
+      doing: "Start it with a password in $OPENCODE_PASSWORD, then try again.",
+      copy: "opencode serve",
+    });
+  });
 });
 
 describe("OpenCode's catalogues", () => {

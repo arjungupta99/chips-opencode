@@ -39,6 +39,13 @@ export interface ServerOptions {
 /** Why the bridge's own server isn't there, said so a person can act on it. */
 export class ServerError extends Error {
   override readonly name = "ServerError";
+  constructor(
+    message: string,
+    /** OpenCode isn't installed here, rather than failing to start. */
+    readonly missing = false,
+  ) {
+    super(message);
+  }
 }
 
 interface Kept {
@@ -118,7 +125,7 @@ export async function ownServer(options: ServerOptions): Promise<OwnServer> {
     if (now === "refused") kept = { port: await freePort(), password: kept.password };
   }
   if (!onPath(command, env)) {
-    throw new ServerError("OpenCode isn't installed on this machine: install it (opencode.ai), then run this again.");
+    throw new ServerError("OpenCode isn't installed on this machine: install it (opencode.ai), then run this again.", true);
   }
   kept ??= { port: await freePort(), password: randomBytes(24).toString("base64url") };
   writeFileSync(path, `${JSON.stringify(kept, null, 2)}\n`, { mode: 0o600 });

@@ -8,7 +8,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { filledIn } from "@chipschat/harness";
+import { filledIn, type StopWords } from "@chipschat/harness";
 import type { AgentConfig } from "./bridge.js";
 import { type AgentInfo, OpenCodeError } from "./opencode.js";
 
@@ -30,10 +30,28 @@ export interface Config {
   readonly agents: readonly AgentConfig[];
 }
 
-/** Something to put right before the bridge starts, said so a person can. */
+/**
+ * Something to put right before the bridge starts, said so a person can: the message in a terminal,
+ * `words` on Chips for Mac's sheet (Chips ADR 0218, phase 5).
+ */
 export class SetupError extends Error {
   override readonly name = "SetupError";
+  constructor(
+    message: string,
+    readonly words: StopWords = {},
+  ) {
+    super(message);
+  }
 }
+
+/** Where a server is, as a person reads it: `127.0.0.1:4096`. */
+export const hostOf = (url: string) => {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+};
 
 export const STILL_GOOD = "The link is still good: run the same command again once that's done.";
 
@@ -85,8 +103,18 @@ export async function checkOpenCode(
     if (error instanceof OpenCodeError && error.status === 401) {
       throw new SetupError(
         `OpenCode at ${config.url} refused the password in $${config.passwordEnv}: give it the one \`opencode serve\` was started with. ${STILL_GOOD}`,
+        {
+          detail: "Its server refused the password",
+          says: "OpenCode refused the password.",
+          doing: `Give $${config.passwordEnv} the password opencode serve was started with.`,
+        },
       );
     }
-    throw new SetupError(`OpenCode isn't answering at ${config.url}: start \`opencode serve\` with a password. ${STILL_GOOD}`);
+    throw new SetupError(`OpenCode isn't answering at ${config.url}: start \`opencode serve\` with a password. ${STILL_GOOD}`, {
+      detail: `Nothing answers at ${hostOf(config.url)}`,
+      says: "OpenCode's server isn't answering.",
+      doing: `Start it with a password in $${config.passwordEnv}, then try again.`,
+      copy: "opencode serve",
+    });
   }
 }
