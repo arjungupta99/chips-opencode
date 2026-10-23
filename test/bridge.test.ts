@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
 import { type Chips, connect, type Decision } from "@chipschat/harness";
-import { createIdGenerator } from "@chipschat/protocol";
+import { createIdGenerator, messageIdOf } from "@chipschat/protocol";
 import {
   Bridge,
   type BridgeState,
@@ -285,6 +285,24 @@ describe("a turn", () => {
     const completed = await sent(chips, "run.completed");
     assert.equal(completed.payload["summary"], THOUGHTFUL);
     assert.equal(spoken("No thinking here."), "No thinking here.");
+  });
+
+  it("hands the agent the message a reply answers, after what was said and before the words (Chips ADR 0219)", async () => {
+    const { chips, opencode } = await rig();
+    await chips.say("summarise the notes");
+    const started = await sent(chips, "run.started");
+    const answer = await sent(chips, "message.post", (event) => event.run_id === started.run_id);
+    await sent(chips, "run.completed");
+    await chips.say("Shorter, please", undefined, { replyTo: messageIdOf(answer.id) });
+    await chips.waitFor((event) => (event.type === "run.completed" && opencode.prompts.length === 2 ? event : undefined), 3000);
+    const prompt = opencode.prompts[1]?.text ?? "";
+    const quote = String(answer.payload["text"])
+      .split("\n")
+      .map((line) => (line === "" ? ">" : `> ${line}`))
+      .join("\n");
+    assert.match(prompt, /Arjun is replying to your message from today at \d{1,2}:\d{2} [AP]M\.\nYour message:\n/);
+    assert.ok(prompt.includes(`Your message:\n${quote}\n\n`), prompt);
+    assert.match(prompt, /Shorter, please$/);
   });
 
   it("keeps one OpenCode session per room, and a second message is the same session", async () => {
