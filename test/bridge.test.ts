@@ -169,6 +169,24 @@ describe("the room's project (Chips ADR 0221)", () => {
     assert.ok(lines.includes("Nova's project: nothing to send"), lines.join("\n"));
   });
 
+  it("says after its words when its change didn't reach the project (Chips AP-6)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chips-opencode-project-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    const { chips } = await rig({ folders: root, projects: true });
+    await chips.say("start the notes");
+    await sent(chips, "run.completed");
+    // A key in the copy holds the whole change back: the reply mustn't read as if it went.
+    const key = ["sk-", "ant-", "api03-", "Z".repeat(40)].join("");
+    writeFileSync(join(root, "opencode", "room", "config.js"), `export const key = "${key}";\n`);
+    await chips.say("go on");
+    const posted = await sent(chips, "message.post", (event) => String(event.payload["text"] ?? "").includes("(Not in"));
+    assert.match(
+      String(posted.payload["text"]),
+      /\n\n\(Not in the room's project: config\.js looks like it holds an Anthropic key, so nothing was sent\.\)$/,
+    );
+    assert.equal(posted.payload["change"], undefined);
+  });
+
   it("leaves sessions that work in the person's own project there, with no room project", async () => {
     const { chips, opencode } = await rig({ projects: true });
     await chips.say("look at my repo");
