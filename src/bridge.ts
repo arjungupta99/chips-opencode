@@ -449,7 +449,7 @@ export class Bridge {
       // The copy came with the original's room and name: it is called and marked for its own.
       await opencode
         .update(copied.id, {
-          title: `Chips room ${spaceId}`,
+          title: `Chips space ${spaceId}`,
           metadata: { ...copied.metadata, chips_space: spaceId, chips_agent: copy.agentId },
         })
         .catch((error: unknown) => this.log(`${copy.name}'s session keeps ${name}'s title: ${messageOf(error)}`));
@@ -637,7 +637,7 @@ export class Bridge {
       }
     }
     const made = await opencode.newSession({
-      title: `Chips room ${spaceId}`,
+      title: `Chips space ${spaceId}`,
       agent: agent.config.agent,
       model: agent.model,
       directory: await this.folderFor({ who, agent }),
@@ -1366,7 +1366,7 @@ export function goalOf(message: MessageNew, name: string): string {
  */
 export function secondLook(who: string, reply: string | undefined, note: string | undefined): { text: string; goal: string } {
   const text = [
-    `${who} says your reply in this room wasn't right.`,
+    `${who} says your reply in this space wasn't right.`,
     ...(reply === undefined ? [] : [`Your reply:\n«${cut(reply.trim(), REPLY_CHARS)}»`]),
     note === undefined ? "They didn't say what. Read your reply again and find what was wrong." : `What wasn't right: «${note}»`,
     "Look at it again and answer properly in its place. If it is not clear what was wrong, ask them in one short line. Say plainly what you changed.",

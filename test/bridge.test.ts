@@ -140,7 +140,7 @@ describe("the room's project (Chips ADR 0221)", () => {
     const copy = join(root, "opencode", "room");
     assert.ok(
       (opencode.prompts[0]?.text ?? "").includes(
-        `The room's project is a git repository. Your copy is ${copy} (0 files), brought up to date just now.`,
+        `The space's project is a git repository. Your copy is ${copy} (0 files), brought up to date just now.`,
       ),
       "told where its copy is",
     );
@@ -182,7 +182,7 @@ describe("the room's project (Chips ADR 0221)", () => {
     const posted = await sent(chips, "message.post", (event) => String(event.payload["text"] ?? "").includes("(Not in"));
     assert.match(
       String(posted.payload["text"]),
-      /\n\n\(Not in the room's project: config\.js looks like it holds an Anthropic key, so nothing was sent\.\)$/,
+      /\n\n\(Not in the space's project: config\.js looks like it holds an Anthropic key, so nothing was sent\.\)$/,
     );
     assert.equal(posted.payload["change"], undefined);
   });
@@ -191,7 +191,7 @@ describe("the room's project (Chips ADR 0221)", () => {
     const { chips, opencode } = await rig({ projects: true });
     await chips.say("look at my repo");
     await sent(chips, "run.completed");
-    assert.doesNotMatch(opencode.prompts[0]?.text ?? "", /The room's project/);
+    assert.doesNotMatch(opencode.prompts[0]?.text ?? "", /The space's project/);
   });
 });
 
@@ -569,7 +569,7 @@ describe("a person's Not right?", () => {
     assert.match(
       again?.text ?? "",
       new RegExp(
-        "(?:^|\n\n)Arjun says your reply in this room wasn't right\\.\n\nYour reply:\n«Here is the answer\\.»\n\n" +
+        "(?:^|\n\n)Arjun says your reply in this space wasn't right\\.\n\nYour reply:\n«Here is the answer\\.»\n\n" +
           `What wasn't right: «${NOTE.replace(/\./g, "\\.")}»\n\nLook at it again and answer properly in its place\\.`,
       ),
     );
@@ -629,7 +629,7 @@ describe("a person's Not right?", () => {
     assert.equal(started.actor.id, agentId);
     assert.equal((await reply(chips, started.run_id)).payload["text"], AGAIN);
     const again = opencode.prompts[0]?.text ?? "";
-    assert.match(again, /(?:^|\n\n)Arjun says your reply in this room wasn't right\.\n\nWhat wasn't right: «Wrong facts\.»/);
+    assert.match(again, /(?:^|\n\n)Arjun says your reply in this space wasn't right\.\n\nWhat wasn't right: «Wrong facts\.»/);
     assert.doesNotMatch(again, /Your reply:|Arjun \(owner\): /);
   });
 
@@ -677,7 +677,7 @@ describe("a copy a person asks for (Chips ADR 0087, Fork)", () => {
     assert.equal(state.folders?.[copy?.agentId ?? ""], join(root, "nova"), "the original's folder");
     assert.equal(state.folders?.[nova], join(root, "nova"));
     assert.deepEqual(opencode.updates, [
-      { sessionId: copied, title: `Chips room ${second}`, metadata: { chips_space: second, chips_agent: copy?.agentId } },
+      { sessionId: copied, title: `Chips space ${second}`, metadata: { chips_space: second, chips_agent: copy?.agentId } },
     ]);
     await chips.say("recall", second);
     const started = await sent(chips, "run.started", (event) => event.space_id === second);
