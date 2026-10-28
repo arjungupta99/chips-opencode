@@ -10,6 +10,7 @@
  * - `drop` loses the event stream midway, and ends while nobody listens.
  * - A second look after a person's Not right? (Chips ADR 0200) answers again.
  * - `recall` says the first words its session remembers, a copy's from its original's.
+ * - `full` reads a great deal, compacts itself, and answers.
  * - Anything else reads a file, says so, and answers.
  *
  * A session is copied as OpenCode 2.0.25 copies one (`POST …/fork`): what it remembers, its
@@ -25,6 +26,9 @@
  * Its catalogue is two models of `nous` it runs, one with levels, and one of `lathe` that is
  * disabled; Heron 2 is its default, and its `plan` agent runs on Heron Mini. A session runs on the
  * model it was made with or last switched to, which OpenCode takes whatever it is.
+ *
+ * Asked to compact a session (`POST …/compact`), it does at once when the session is idle, and
+ * after the step it is on when it is working; with `compactFails`, it fails saying so.
  *
  * Restarted, its event streams are cut and nothing answers for a while; its sessions are kept, as
  * OpenCode keeps them on disk.
@@ -49,6 +53,10 @@ interface FakeSession {
   readonly directory?: string;
   /** The model it was made with or last switched to. */
   model?: unknown;
+  /** Its newest model call's tokens and model, and when. */
+  lastCall?: { tokens: unknown; model: unknown; at: number };
+  /** A compaction asked while it worked, for its next step's end. */
+  compactAsked?: boolean;
   title?: unknown;
   metadata?: unknown;
   /** What it remembers: each person's words it took, and each answer, in order. */
@@ -141,6 +149,8 @@ export async function startFakeOpenCode(
     version?: string;
     /** What its config's `instructions` names, for every folder. */
     instructions?: string[];
+    /** Why each compaction fails, when they do. */
+    compactFails?: string;
   } = {},
 ): Promise<FakeOpenCode> {
   /** With `cold`, its first catalogue answers are empty, as OpenCode 2.0's are for a project it hasn't loaded. */
@@ -180,12 +190,27 @@ export async function startFakeOpenCode(
   const model = { providerID: "nous", id: "heron-2" };
 
   /** One model call, on the session's model: its message's start, what it says and does, and its cost. */
-  const step = async (session: FakeSession, does: (message: string) => Promise<void>, of?: unknown) => {
+  const step = async (session: FakeSession, does: (message: string) => Promise<void>, of?: unknown, read = tokens) => {
     const message = next("msg");
     const on = of ?? session.model ?? model;
     emit("session.step.started", { sessionID: session.id, assistantMessageID: message, agent: session.agent, model: on, started: Date.now() });
     await does(message);
-    emit("session.step.ended", { sessionID: session.id, assistantMessageID: message, finish: "stop", cost: 0.0042, tokens });
+    emit("session.step.ended", { sessionID: session.id, assistantMessageID: message, finish: "stop", cost: 0.0042, tokens: read });
+    session.lastCall = { tokens: read, model: on, at: Date.now() };
+    if (session.compactAsked === true) {
+      session.compactAsked = false;
+      compaction(session, "manual");
+    }
+  };
+  /** A compaction of the session: what it held summed up, and the newest words kept as they were. */
+  const compaction = (session: FakeSession, reason: "auto" | "manual") => {
+    emit("session.compaction.started", { sessionID: session.id, reason, recent: "" });
+    if (options.compactFails !== undefined) {
+      emit("session.compaction.failed", { sessionID: session.id, reason, error: { type: "ProviderError", message: options.compactFails } });
+      return;
+    }
+    const used = { input: 600, output: 900, reasoning: 0, cache: { read: 5000, write: 0 } };
+    emit("session.compaction.ended", { sessionID: session.id, reason, model, text: "## Objective\n…", recent: "r".repeat(400), tokens: used, cost: 0 });
   };
   const say = (session: FakeSession, message: string, text: string) => {
     session.last = text;
@@ -284,6 +309,12 @@ export async function startFakeOpenCode(
       );
     }
     if (/\bfail\b/.test(words)) throw new Error("The model refused.");
+    if (/\bfull\b/.test(words)) {
+      // A great deal read, nearly all of the window; then OpenCode compacts it itself.
+      await step(session, async (message) => say(session, message, "Read it all."), undefined, { ...tokens, input: 150_000 });
+      compaction(session, "auto");
+      return step(session, async (message) => say(session, message, "Compacted and done."));
+    }
     if (/\bsend\b/.test(words)) {
       // Files named as the Chips SDK tells an agent: one from its folder, one from outside it.
       return step(session, async (message) => say(session, message, "The page is ready.\n\nMEDIA:page.html\nMEDIA:../secret.txt"));
@@ -467,7 +498,17 @@ export async function startFakeOpenCode(
       }
       if (method === "GET" && rest === "inbox") return json(response, 200, { data: session.inbox.map((item) => ({ id: item.id })) });
       if (method === "GET" && rest === "message") {
-        return json(response, 200, { data: [{ type: "assistant", content: [{ type: "text", text: session.last }] }], cursor: {} });
+        const call = session.lastCall;
+        return json(response, 200, {
+          data: [
+            {
+              type: "assistant",
+              content: [{ type: "text", text: session.last }],
+              ...(call === undefined ? {} : { tokens: call.tokens, model: call.model, time: { created: call.at } }),
+            },
+          ],
+          cursor: {},
+        });
       }
       const body = method === "DELETE" ? {} : await bodyOf(request);
       if (method === "PATCH" && rest === undefined) {
@@ -512,6 +553,18 @@ export async function startFakeOpenCode(
             location: { directory: session.directory ?? directory },
           },
         });
+      }
+      if (method === "POST" && rest === "compact") {
+        const id = next("msg");
+        json(response, 200, { data: { id, sessionID: session.id, type: "compaction", payload: {}, delivery: "steer", time: { created: 0 } } });
+        if (session.busy) session.compactAsked = true;
+        else {
+          emit("session.execution.started", { sessionID: session.id });
+          emit("session.inbox.delivered", { sessionID: session.id, inboxID: id });
+          compaction(session, "manual");
+          emit("session.execution.succeeded", { sessionID: session.id });
+        }
+        return;
       }
       if (method === "POST" && rest === "model") {
         fake.switched.push({ sessionId: session.id, model: body["model"] });

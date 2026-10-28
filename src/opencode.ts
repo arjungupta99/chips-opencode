@@ -236,6 +236,14 @@ export class OpenCodeClient {
     return id;
   }
 
+  /**
+   * Compact a session: its inbox takes the ask, which starts at once when it is idle and at its next
+   * step when it is working. `session.compaction.started` and `.ended` or `.failed` say how it goes.
+   */
+  async compact(sessionId: string): Promise<void> {
+    await this.call("POST", `/api/session/${encodeURIComponent(sessionId)}/compact`, {});
+  }
+
   /** Words the session hasn't taken yet, taken back. */
   async withdraw(sessionId: string, item: string): Promise<void> {
     await this.call("DELETE", `/api/session/${encodeURIComponent(sessionId)}/inbox/${encodeURIComponent(item)}`);
@@ -294,6 +302,23 @@ export class OpenCodeClient {
       .filter((part) => part["type"] === "text" && typeof part["text"] === "string")
       .map((part) => String(part["text"]))
       .join("\n\n");
+  }
+
+  /** The tokens and model of a session's newest model call, and when: nothing for a session with none. */
+  async lastCall(sessionId: string): Promise<{ tokens: Record<string, unknown>; model?: ModelRef; at: number } | undefined> {
+    const read = await this.call(
+      "GET",
+      `/api/session/${encodeURIComponent(sessionId)}/message?type=assistant&order=desc&limit=1`,
+    );
+    const newest = (Array.isArray(read["data"]) ? (read["data"] as Record<string, unknown>[]) : [])[0];
+    const tokens = newest?.["tokens"];
+    if (typeof tokens !== "object" || tokens === null) return undefined;
+    const time = (newest?.["time"] ?? {}) as Record<string, unknown>;
+    return {
+      tokens: tokens as Record<string, unknown>,
+      ...(typeof newest?.["model"] === "object" && newest["model"] !== null ? { model: newest["model"] as ModelRef } : {}),
+      at: typeof time["created"] === "number" ? time["created"] : 0,
+    };
   }
 
   /** Every event the server sends, each handed to `hear` as it comes, until the stream ends. */

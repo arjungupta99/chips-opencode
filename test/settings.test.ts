@@ -1,6 +1,6 @@
 /**
  * What a person sees and changes of the harness's agents from their pages (Chips ADR 0241): their
- * models and their files. Against Chips's conformance fake, which checks every copy against the
+ * models, their files and their context windows. Against Chips's conformance fake, which checks every copy against the
  * protocol's schemas, and the scripted OpenCode, with a home of the test's own, so nobody's own
  * OpenCode files are read.
  */
@@ -16,10 +16,11 @@ import { createIdGenerator } from "@chipschat/protocol";
 import { type AgentConfig, Bridge, type BridgeState, settingsFor } from "../src/bridge.ts";
 import { before, hashOf, namedFiles, upTo } from "../src/context.ts";
 import { modelCopy, pickOf } from "../src/models.ts";
+import { compactedTo, OWN_LIMIT } from "../src/windows.ts";
 import { OpenCodeClient } from "../src/opencode.ts";
 import { CATALOGUE, type FakeOpenCode, startFakeOpenCode } from "./fake-opencode.ts";
 
-const CAPABILITIES = ["agents", "new_spaces", "new_agents", "forks", "models", "context_files"];
+const CAPABILITIES = ["agents", "new_spaces", "new_agents", "forks", "models", "context_files", "context_windows"];
 
 type Body = Record<string, unknown>;
 
@@ -123,6 +124,8 @@ async function hear(rig: Rig, frame: Body): Promise<string> {
 
 const modelOf = (rig: Rig, agentId = rig.agentId) => rig.chips.settings.copy("model", agentId) as Body | undefined;
 const filesOf = (rig: Rig, agentId = rig.agentId) => rig.chips.settings.copy("context", agentId) as { files: Body[] } | undefined;
+const windowOf = (rig: Rig, agentId = rig.agentId) => rig.chips.settings.copy("context-window", agentId) as Body | undefined;
+const answersTo = (rig: Rig, changeId: string) => rig.chips.settings.answers.filter((answer) => answer.changeId === changeId);
 const sharedOf = (rig: Rig) => rig.chips.settings.copy("harness-context", rig.chips.address.harnessId) as { shared: Body[] } | undefined;
 const answerTo = (rig: Rig, changeId: string) => rig.chips.settings.answerTo(changeId);
 
@@ -387,5 +390,88 @@ describe("an agent's files (Chips ADRs 0134, 0241)", () => {
     assert.equal(before("2.0.25", "2.0.30"), true);
     assert.equal(before("2.1.0", "2.0.30"), false);
     assert.equal(before("2.0.30", "2.0.30"), false);
+  });
+});
+
+describe("an agent's context window (Chips ADRs 0146, 0241)", () => {
+  it("says how full its session is after a turn, of its model's window, and how full a long turn got", async () => {
+    const main = await rig();
+    assert.equal(windowOf(main), undefined, "nothing until it has said");
+    await turn(main.chips, "one");
+    const first = await until(() => windowOf(main));
+    assert.deepEqual(
+      { ...first, as_of: "" },
+      { used: 1250, window: 200_000, model: "nous/heron-2", as_of: "", compacts: true, editable: false, why_read_only: OWN_LIMIT },
+    );
+    // Nearly full: OpenCode compacts it itself, and goes on.
+    await turn(main.chips, "read the full logs");
+    const after = await until(() => (windowOf(main)?.["long_turn"] === undefined ? undefined : windowOf(main)));
+    assert.equal(after["used"], 1250);
+    assert.deepEqual({ ...(after["last"] as Body), at: "" }, { at: "", from: 150_250, to: 1000, by: "itself" });
+    assert.deepEqual({ ...(after["long_turn"] as Body), at: "" }, { at: "", peak: 150_250, folds: 1 });
+    assert.ok(main.state.windows?.["opencode:build:opencode"] !== undefined, "kept for a restart");
+  });
+
+  it("compacts the session it said last from Chips: at once when idle, after its step when working", async () => {
+    const main = await rig();
+    const { chips, opencode, agentId } = main;
+    await turn(chips, "one");
+    await until(() => windowOf(main));
+    const now = await hear(main, { frame: "context_window.compact", agent_id: agentId });
+    assert.equal(answerTo(main, now)?.made, true);
+    const done = await until(() => (windowOf(main)?.["last"] === undefined ? undefined : windowOf(main)));
+    assert.deepEqual({ ...(done["last"] as Body), at: "" }, { at: "", from: 1250, to: 1000, by: "asked" });
+    assert.equal(done["compacting"], undefined);
+    assert.equal(done["used"], 1000);
+    // Working: it waits for the step the session is on.
+    const said = await chips.say("slow");
+    const started = await chips.waitFor((event) => (event.type === "run.started" && event.seq > said.seq ? event : undefined), 3000);
+    await until(() => opencode.prompts.length === 2);
+    const later = await hear(main, { frame: "context_window.compact", agent_id: agentId });
+    assert.equal(answerTo(main, later)?.made, true);
+    assert.equal(windowOf(main)?.["compacting"], "queued");
+    await chips.waitFor((event) => (event.type === "run.completed" && event.run_id === started.run_id ? event : undefined), 3000);
+    const again = await until(() => {
+      const copy = windowOf(main);
+      return copy?.["compacting"] === undefined && (copy?.["last"] as Body)["at"] !== (done["last"] as Body)["at"] && copy;
+    });
+    assert.deepEqual([(again["last"] as Body)["from"], (again["last"] as Body)["by"]], [1250, "asked"]);
+  });
+
+  it("keeps OpenCode's own limit, and says why a compaction OpenCode didn't make failed", async () => {
+    const opencode = await startFakeOpenCode({ compactFails: "Nothing to compact yet." });
+    open.push(() => opencode.close());
+    const main = await rig({ opencode });
+    await turn(main.chips, "one");
+    await until(() => windowOf(main));
+    const limit = await hear(main, { frame: "context_window.change", agent_id: main.agentId, at: 80 });
+    assert.deepEqual([answerTo(main, limit)?.made, answerTo(main, limit)?.message], [false, OWN_LIMIT]);
+    const compact = await hear(main, { frame: "context_window.compact", agent_id: main.agentId });
+    await until(() => answersTo(main, compact).length === 2);
+    assert.deepEqual(
+      answersTo(main, compact).map((answer) => [answer.made, answer.message]),
+      [
+        [true, undefined],
+        [false, "Nothing to compact yet."],
+      ],
+    );
+  });
+
+  it("sends at start what an agent last said, from its sessions where the bridge kept nothing", async () => {
+    const opencode = await startFakeOpenCode();
+    open.push(() => opencode.close());
+    const before = await rig({ opencode });
+    await turn(before.chips, "one");
+    const session = opencode.created[0]?.id ?? "";
+    // A bridge from before it kept windows, on the same OpenCode.
+    const after = await rig({ opencode, state: { sessions: { "opencode:build:opencode|spc_earlier": session } } });
+    const copy = await until(() => windowOf(after));
+    assert.deepEqual([copy["used"], copy["window"], copy["model"]], [1250, 200_000, "nous/heron-2"]);
+    assert.equal(after.state.windows?.["opencode:build:opencode"]?.session, session);
+  });
+
+  it("counts what a compaction kept: the summary's tokens, and the recent words at four characters a token", () => {
+    assert.equal(compactedTo({ tokens: { input: 1, output: 900, reasoning: 0, cache: { read: 0, write: 0 } }, recent: "r".repeat(400) }), 1000);
+    assert.equal(compactedTo({}), 0);
   });
 });

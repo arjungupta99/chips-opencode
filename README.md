@@ -15,7 +15,8 @@ server (`opencode serve`, 2.0).
   remember apart.
 - Restart on the harness's page restarts the OpenCode server the bridge runs (see [Restart](#restart)).
 - Each agent's page shows its model and the files OpenCode builds it from, which a person may
-  change there (see [Models](#models) and [Context files](#context-files)).
+  change there, and how full its context window is, which a person may compact from there (see
+  [Models](#models), [Context files](#context-files) and [Context window](#context-window)).
 
 Apache-2.0. Not published: a local repository until Chips's SDK is.
 
@@ -32,8 +33,9 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | Files in the reply | each `MEDIA:<path>` line of its own in the answer, taken out of the words and sent from the session's folder (the agent's own), as OpenCode says it (each turn is told how); a file outside it is refused, and the reply says so |
 | Cost and tokens | each model call's `session.step.ended`: OpenCode's own cost, as a step's share |
 | The context gauge | the last call's tokens against the model's window from `GET /api/model` |
-| An agent's files (Chips ADRs 0134, 0241) | the `AGENTS.md` files OpenCode reads for its folder, and from OpenCode 2.0.30 (`GET /api/info`) the files its config's `instructions` names (`GET /api/config`); a person's edit saved where OpenCode reads it (see [Context files](#context-files)) |
 | An agent's model (Chips ADR 0241) | the models `GET /api/model` lists that OpenCode runs, each with its variants as levels; a person's pick put on the agent's session before its next message with `POST /api/session/{id}/model` (see [Models](#models)) |
+| An agent's files (Chips ADRs 0134, 0241) | the `AGENTS.md` files OpenCode reads for its folder, and from OpenCode 2.0.30 (`GET /api/info`) the files its config's `instructions` names (`GET /api/config`); a person's edit saved where OpenCode reads it (see [Context files](#context-files)) |
+| An agent's context window (Chips ADRs 0146, 0241) | its session's last model call's tokens, of its model's context limit from `GET /api/model`; Compact now is `POST /api/session/{id}/compact`, and `session.compaction.started`, `.ended` and `.failed` say how it went (see [Context window](#context-window)) |
 | An approval card | `permission.asked` → `POST …/permission/{id}/reply`: `always` when a person said always, else `once`, and `once` for a command, which Chips remembers by how each part starts (Chips ADR 0239); `reject` with their reason for a no. One answered in OpenCode's own apps is settled in Chips (ADR 0079) |
 | A question | a `form.created` whose fields are choices or yes-or-no, at most four → `POST …/form/{id}/reply` |
 | Stop | `POST …/interrupt`, and the words OpenCode hasn't taken yet taken back |
@@ -99,6 +101,22 @@ changed meanwhile. A copy made by Fork works in its original's folder, so it rea
 A URL in `instructions` isn't shown, nor is the `AGENTS.md` of a folder inside the agent's, which
 OpenCode reads only once the agent reads a file there. With a `directory` in the config, every
 agent's own files are that project's.
+
+## Context window
+
+An agent's Context window group in Chips (Chips ADRs 0146, 0241) says how full its session is: the
+tokens of its last model call, all it read and all it wrote, of its model's context limit. An
+agent has a session in each space it is in, and Chips one window for it, so the group is of the
+session that worked last; a bridge from before 1.0.7 reads it from that session's newest model
+call when it starts. A turn that went past half the window says how full it got, and how often
+OpenCode compacted it meanwhile.
+
+Compact now asks OpenCode to compact that session (`POST /api/session/{id}/compact`): at once
+when it is idle, and at its next step when it is working. OpenCode's events say when it starts and
+how it went: what it held before, and after it the summary it wrote and the recent words it kept
+as they were, these counted at four characters a token until its next model call says exactly.
+OpenCode compacts a session itself when it is nearly full, as its config's `compaction` says, and
+takes no other limit, so Chips shows the limit as OpenCode's own and doesn't offer one.
 
 ## Restart
 

@@ -36,7 +36,8 @@
  * Each agent's page in Chips shows its model (Chips ADR 0241, `models.ts`): one of the models
  * OpenCode's server runs, at one of its levels, picked there and kept here, and given to each
  * session of the agent's before its next message. It shows the files OpenCode builds the agent
- * from too (`context.ts`), which a person may change there.
+ * from too (`context.ts`), which a person may change there, and how full its session is, which a
+ * person may compact from there (`windows.ts`).
  */
 
 import { mkdirSync } from "node:fs";
@@ -45,6 +46,7 @@ import { join } from "node:path";
 import type {
   Agent,
   AgentContextCopy,
+  AgentContextWindowCopy,
   AgentModelCopy,
   ApprovalInput,
   Chips,
@@ -68,9 +70,12 @@ import {
   type ModelChangeFrame,
   type ProjectFacts,
   type StepKind,
+  type WindowChangeFrame,
+  type WindowCompactFrame,
 } from "@chipschat/protocol";
 import { before, ContextFiles, namedFiles, type Places, placesOf, READS_NAMED, type Reading, within } from "./context.js";
 import { type Fallback, type ModelPick, modelCopy, pickOf, refOf, sameModel, writtenOf } from "./models.js";
+import { compactedTo, type KeptWindow, type Tokens, usedOf, windowCopy } from "./windows.js";
 import {
   type FormAnswer,
   type ModelRef,
@@ -107,15 +112,17 @@ export interface BridgeState {
   forks?: Record<string, { readonly session?: string; readonly folder?: string }>;
   /** Each agent's own model and level, picked in Chips (Chips ADR 0241), by whose sessions they are. */
   models?: Record<string, ModelPick>;
+  /** How full each agent last said it was, by whose sessions they are (Chips ADRs 0146, 0241). */
+  windows?: Record<string, KeptWindow>;
 }
 
 /**
  * What the harness asks Chips to let it do, when it joins with a code: have agents of its own
  * (Chips ADR 0087), take a space a person asks for from the + (ADR 0241), make a new one a person
- * asks for in a room (ADR 0108), copy one for a person's Fork, and show each one's model and files
- * (ADR 0241). A link carries what the person chose instead.
+ * asks for in a room (ADR 0108), copy one for a person's Fork, and show each one's model, files and
+ * context window (ADR 0241). A link carries what the person chose instead.
  */
-export const WANTS = ["agents", "new_spaces", "new_agents", "forks", "models", "context_files"] as const;
+export const WANTS = ["agents", "new_spaces", "new_agents", "forks", "models", "context_files", "context_windows"] as const;
 
 /**
  * What it asks for when it joins: `WANTS`, and `restarts` where the bridge runs OpenCode's server
@@ -260,6 +267,12 @@ interface Turn {
   readonly run: Run;
   readonly speaker: Speaker;
   readonly agent: Running;
+  /** Whose session it is (`Room.who`), and the Chips agent taking the turn. */
+  readonly who: string;
+  readonly agentId: string;
+  /** The most the session held at once during the turn, and how often it compacted itself. */
+  peak: number;
+  folds: number;
   readonly sessionId: string;
   /** Inbox items given and not yet taken: the turn ends only once all are, and the session is idle. */
   readonly waiting: Set<string>;
@@ -330,6 +343,8 @@ export class Bridge {
   private readonly roots = new Map<string, string>();
   /** Whether the server reads the files its config's `instructions` names, asked once a start or a restart. */
   private readsNamed: Promise<boolean> | undefined;
+  /** Agents compacting now, by whose sessions they are: waiting for their session's next step, or under way, and the ask from Chips. */
+  private readonly compacting = new Map<string, { state: "queued" | "running"; changeId?: string | undefined }>();
 
   constructor(private readonly options: BridgeOptions) {
     this.log = options.log ?? (() => undefined);
@@ -369,6 +384,7 @@ export class Bridge {
       if (agent.state !== "archived") await this.sendModel(agent.agentId);
     }
     await this.sendContexts();
+    await this.sendWindows();
     await this.sayHowItIs();
     this.health = setInterval(() => void this.sayHowItIs(), this.options.healthEveryMs ?? 30_000);
     this.health.unref();
@@ -834,6 +850,144 @@ export class Bridge {
     return files.agentCopy(folder, reading);
   }
 
+  // ------------------------------------------------------------------ how full each agent is (Chips ADRs 0146, 0241)
+
+  /** The Chips agent whose sessions are `who`'s: a configured agent's, or the agent itself. */
+  private agentIdOf(who: string): string {
+    return this.agents.find((agent) => agent.key === who)?.agentId ?? who;
+  }
+
+  /** Whose a session is, by the rooms the bridge keeps: nothing for one it didn't make. */
+  private whoseSession(sessionId: string): string | undefined {
+    const id = Object.entries(this.options.state.sessions).find(([, each]) => each === sessionId)?.[0];
+    return id?.slice(0, id.lastIndexOf("|"));
+  }
+
+  /** An agent's window copy sent, and kept with the bridge's state: nothing until it has said how full it is. */
+  private async sendWindow(who: string): Promise<void> {
+    const kept = this.options.state.windows?.[who];
+    if (kept === undefined) return;
+    this.options.saveState(this.options.state);
+    await this.options.chips.settings
+      .contextWindow(this.agentIdOf(who), windowCopy(kept, this.compacting.get(who)?.state))
+      .catch((error: unknown) => this.log(`the context window of ${who} not sent: ${messageOf(error)}`));
+  }
+
+  /**
+   * Each agent's window as it last said, at start. One the bridge kept nothing of, from before it
+   * kept them, is read from the newest model call of its sessions.
+   */
+  private async sendWindows(): Promise<void> {
+    const { opencode, state } = this.options;
+    const whose = new Set(Object.keys(state.sessions).map((id) => id.slice(0, id.lastIndexOf("|"))));
+    for (const who of whose) {
+      if (state.windows?.[who] === undefined) {
+        let newest: { sessionId: string; call: NonNullable<Awaited<ReturnType<OpenCodeClient["lastCall"]>>> } | undefined;
+        for (const [id, sessionId] of Object.entries(state.sessions)) {
+          if (!id.startsWith(`${who}|`)) continue;
+          const call = await opencode.lastCall(sessionId).catch(() => undefined);
+          if (call !== undefined && (newest === undefined || call.at > newest.call.at)) newest = { sessionId, call };
+        }
+        const model = newest?.call.model === undefined ? undefined : writtenOf(newest.call.model);
+        const window = model === undefined ? undefined : await this.windowOf(model);
+        if (newest === undefined || model === undefined || window === undefined) continue;
+        const asOf = new Date(newest.call.at > 0 ? newest.call.at : Date.now()).toISOString();
+        state.windows = { ...state.windows, [who]: { used: usedOf(newest.call.tokens as unknown as Tokens), window, model, asOf, session: newest.sessionId } };
+      }
+      await this.sendWindow(who);
+    }
+  }
+
+  /** A turn ended: how full it got, where that passed half the window, and the copy as it is now. */
+  private async turnHeld(turn: Turn): Promise<void> {
+    const kept = this.options.state.windows?.[turn.who];
+    if (kept === undefined) return;
+    if (turn.peak > kept.window / 2) {
+      kept.longTurn = { at: new Date().toISOString(), peak: Math.round(turn.peak), folds: turn.folds };
+    }
+    await this.sendWindow(turn.who);
+  }
+
+  /**
+   * What OpenCode says of a compaction of one of the agents' sessions: under way, done, with how
+   * much it held before and after, or failed. A Compact now asked from Chips that failed is
+   * refused after all, in OpenCode's words.
+   */
+  private compactionHeard(sessionId: string, event: OpenCodeEvent): void {
+    const who = this.whoseSession(sessionId);
+    const kept = who === undefined ? undefined : this.options.state.windows?.[who];
+    if (who === undefined || kept === undefined) return;
+    const asked = this.compacting.get(who);
+    if (event.type === "session.compaction.started") {
+      if (asked === undefined) this.compacting.set(who, { state: "running" });
+      else asked.state = "running";
+      void this.sendWindow(who);
+      return;
+    }
+    if (event.type === "session.compaction.ended") {
+      this.compacting.delete(who);
+      const to = compactedTo(event.data);
+      const by = event.data["reason"] === "manual" ? "asked" : "itself";
+      kept.last = { at: new Date().toISOString(), from: Math.round(kept.used), to, by };
+      kept.used = to;
+      kept.asOf = kept.last.at;
+      kept.session = sessionId;
+      const turn = this.turns.get(sessionId);
+      if (turn !== undefined && by === "itself") turn.folds += 1;
+      this.log(`${who} compacted (${by}), ${kept.last.from} to ${to} tokens`);
+      void this.sendWindow(who);
+      return;
+    }
+    if (event.type === "session.compaction.failed") {
+      this.compacting.delete(who);
+      const error = (event.data["error"] ?? {}) as Record<string, unknown>;
+      const why = text(error["message"]) ?? "OpenCode didn't compact it.";
+      this.log(`${who} not compacted: ${why}`);
+      if (asked?.changeId === undefined) {
+        void this.sendWindow(who);
+        return;
+      }
+      void this.options.chips.settings
+        .contextWindowFailed(this.agentIdOf(who), asked.changeId, why, windowCopy(kept))
+        .catch((failed: unknown) => this.log(`the context window of ${who} not sent: ${messageOf(failed)}`));
+    }
+  }
+
+  /**
+   * A person's Compact now (Chips ADR 0146): asked of OpenCode for the session the agent said it
+   * was in last, which takes it at once when idle and at its next step when working, and answered
+   * with the copy saying so. How it goes comes in OpenCode's own events.
+   */
+  async windowCompact(ask: WindowCompactFrame): Promise<AgentContextWindowCopy> {
+    const whose = await this.whoseIs(ask.agent_id);
+    if (whose === undefined) throw new Refuse("This harness has no such agent.");
+    const { who } = whose;
+    const kept = this.options.state.windows?.[who];
+    if (kept === undefined) throw new Refuse(`${await this.nameOf(whose)} hasn't said how full it is yet.`);
+    if (this.compacting.has(who)) throw new Refuse("It is compacting already.", windowCopy(kept, this.compacting.get(who)?.state));
+    const { opencode } = this.options;
+    const busy = this.turns.has(kept.session) || (await opencode.active().catch(() => new Set<string>())).has(kept.session);
+    this.compacting.set(who, { state: busy ? "queued" : "running", changeId: ask.change_id });
+    try {
+      await opencode.compact(kept.session);
+    } catch (error) {
+      this.compacting.delete(who);
+      throw new Refuse(`OpenCode didn't take it: ${messageOf(error)}`, windowCopy(kept));
+    }
+    this.log(`${await this.nameOf(whose)} compacts ${busy ? "at its session's next step" : "now"}, from Chips`);
+    // As it stands now: a compaction done meanwhile has said so already.
+    return windowCopy(kept, this.compacting.get(who)?.state);
+  }
+
+  /** A person's limit: OpenCode keeps its own, set in its config, and the copy says so. */
+  async windowChange(ask: WindowChangeFrame): Promise<AgentContextWindowCopy> {
+    const whose = await this.whoseIs(ask.agent_id);
+    const kept = whose === undefined ? undefined : this.options.state.windows?.[whose.who];
+    if (whose === undefined) throw new Refuse("This harness has no such agent.");
+    const copy = kept === undefined ? undefined : windowCopy(kept, this.compacting.get(whose.who)?.state);
+    throw new Refuse(copy?.why_read_only ?? "OpenCode keeps its own limit.", copy);
+  }
+
   // ------------------------------------------------------------------ what is said to it
 
   /** A message for some of its agents: each takes a turn in its room, one after another there. */
@@ -952,6 +1106,10 @@ export class Bridge {
       run,
       speaker,
       agent,
+      who: room.who,
+      agentId: speakerId ?? agent.agentId,
+      peak: 0,
+      folds: 0,
       sessionId,
       waiting: new Set(),
       taken: new Set(),
@@ -985,8 +1143,9 @@ export class Bridge {
     else await this.ended(turn, last);
     // What OpenCode offers may have changed meanwhile, a provider set up, and the agent may have
     // changed its own files.
-    await this.sendModel(speakerId ?? agent.agentId);
-    await this.sendContext(speakerId ?? agent.agentId);
+    await this.sendModel(turn.agentId);
+    await this.sendContext(turn.agentId);
+    await this.turnHeld(turn);
   }
 
   /** The words into the room's session: the one it had, or a new one when OpenCode no longer has it. */
@@ -1162,6 +1321,13 @@ export class Bridge {
     }
     // A copy names its original as `parentID` here, and is no sub-agent of it: nothing it does is the original's.
     if (event.type === "session.forked") return;
+    // A compaction of an agent's session, asked from Chips or OpenCode's own: after what its turn
+    // heard before it, where one is going.
+    if (event.type.startsWith("session.compaction.")) {
+      const going = this.turns.get(sessionId);
+      if (going === undefined) this.compactionHeard(sessionId, event);
+      else going.chain = going.chain.then(() => this.compactionHeard(sessionId, event));
+    }
     const own = this.turns.get(sessionId);
     if (own === undefined && this.early.has(sessionId)) {
       this.early.get(sessionId)?.push(event);
@@ -1354,6 +1520,10 @@ export class Bridge {
     const limit = await this.windowOf(model);
     if (limit === undefined) return;
     await turn.run.context({ usedTokens: prompt + written, limitTokens: limit, model }).catch(() => undefined);
+    // How full the agent is, for its page (Chips ADR 0241): sent when the turn ends.
+    const windows = (this.options.state.windows ??= {});
+    windows[turn.who] = { ...windows[turn.who], used: prompt + written, window: limit, model, asOf: new Date().toISOString(), session: turn.sessionId };
+    turn.peak = Math.max(turn.peak, prompt + written);
   }
 
   /** A model's context window, from OpenCode's catalogue, read once (and once more for each it lacked). */
@@ -1553,7 +1723,7 @@ export class Bridge {
 
 /**
  * What a person changes of the harness's agents from their pages, made by the bridge once it is
- * running: each agent's model and files (Chips ADR 0241).
+ * running: each agent's model, files and context window (Chips ADR 0241).
  */
 export function settingsFor(bridge: () => Bridge | undefined): SettingsHandlers {
   const active = (): Bridge => {
@@ -1564,17 +1734,14 @@ export function settingsFor(bridge: () => Bridge | undefined): SettingsHandlers 
   return {
     models: (change) => active().modelChanged(change),
     context: (edit) => active().contextEdited(edit),
+    contextWindows: {
+      compact: (ask) => active().windowCompact(ask),
+      change: (ask) => active().windowChange(ask),
+    },
   };
 }
 
 // ------------------------------------------------------------------ small words
-
-interface Tokens {
-  readonly input: number;
-  readonly output: number;
-  readonly reasoning: number;
-  readonly cache: { readonly read: number; readonly write: number };
-}
 
 interface Field {
   readonly key: string;

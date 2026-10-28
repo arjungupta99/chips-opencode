@@ -1,6 +1,6 @@
 /**
  * The golden scenario of Chips's conformance kit, played against the bridge and a scripted OpenCode
- * that asks before it acts: what `chips conformance custom --capabilities agents,new_spaces,new_agents,restarts,models,context_files`
+ * that asks before it acts: what `chips conformance custom --capabilities agents,new_spaces,new_agents,restarts,models,context_files,context_windows`
  * checks of it live, running OpenCode's server itself, which a person's Restart restarts.
  */
 
@@ -26,7 +26,7 @@ it("passes the golden scenario", async () => {
       beatTimeoutMs: 3000,
       subject: {
         name: "chips-opencode",
-        capabilities: ["agents", "new_spaces", "new_agents", "restarts", "models", "context_files"],
+        capabilities: ["agents", "new_spaces", "new_agents", "restarts", "models", "context_files", "context_windows"],
         start: async (address) => {
           client = await connect({
             url: address.url,
@@ -65,11 +65,11 @@ it("passes the golden scenario", async () => {
         ["Talks", 1],
         ["Supervised", 1],
         ["Lives in Chips", 4],
-        ["Managed from Chips", 2],
+        ["Managed from Chips", 3],
       ],
     );
     const managed = Object.fromEntries((report.levels[3]?.capabilities ?? []).map((each) => [each.capability, each.outcome]));
-    assert.deepEqual(managed, { models: "passed", context_files: "passed" });
+    assert.deepEqual(managed, { models: "passed", context_files: "passed", context_windows: "passed" });
   } finally {
     await opencode.close();
     rmSync(home, { recursive: true, force: true });
