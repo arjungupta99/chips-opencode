@@ -20,6 +20,9 @@
  * the rest when it is done. An interrupt parks what waited; words given after it start afresh.
  *
  * With `askFirst`, every session asks before it answers, as the golden scenario needs.
+ *
+ * Restarted, its event streams are cut and nothing answers for a while; its sessions are kept, as
+ * OpenCode keeps them on disk.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -94,13 +97,15 @@ export interface FakeOpenCode {
   forget(sessionId: string): void;
   /** What a session remembers. */
   historyOf(sessionId: string): readonly string[];
+  /** Stopped and started again: its streams cut, nothing answering for `downMs`, its sessions kept. */
+  restart(downMs: number): Promise<void>;
   close(): Promise<void>;
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function startFakeOpenCode(
-  options: { askFirst?: boolean; directory?: string; cold?: boolean; port?: number; password?: string } = {},
+  options: { askFirst?: boolean; directory?: string; cold?: boolean; port?: number; password?: string; pid?: number } = {},
 ): Promise<FakeOpenCode> {
   /** With `cold`, its first catalogue answers are empty, as OpenCode 2.0's are for a project it hasn't loaded. */
   let cold = options.cold === true ? 2 : 0;
@@ -114,7 +119,7 @@ export async function startFakeOpenCode(
   let count = 0;
   let deaf = false;
   const next = (prefix: string) => `${prefix}_${(count += 1)}`;
-  const fake: Omit<FakeOpenCode, "url" | "close" | "forget" | "historyOf"> = {
+  const fake: Omit<FakeOpenCode, "url" | "close" | "forget" | "historyOf" | "restart"> = {
     password,
     created: [],
     forks: [],
@@ -342,7 +347,7 @@ export async function startFakeOpenCode(
       const path = url.pathname;
       if (!fake.up) return json(response, 503, { _tag: "Unavailable", message: "down" });
       if (request.headers.authorization !== auth) return json(response, 401, { _tag: "UnauthorizedError", message: "Authentication required" });
-      if (method === "GET" && path === "/api/info") return json(response, 200, { version: "2.0.29", pid: 1, urls: [], paths: { tmp: "/tmp" } });
+      if (method === "GET" && path === "/api/info") return json(response, 200, { version: "2.0.29", pid: options.pid ?? 1, urls: [], paths: { tmp: "/tmp" } });
       if (method === "GET" && path === "/api/agent") {
         if (cold > 0) {
           cold -= 1;
@@ -509,6 +514,12 @@ export async function startFakeOpenCode(
     url: `http://127.0.0.1:${port}`,
     forget: (sessionId: string) => void sessions.delete(sessionId),
     historyOf: (sessionId: string) => [...(sessions.get(sessionId)?.history ?? [])],
+    restart: async (downMs: number) => {
+      fake.up = false;
+      for (const stream of streams) stream.destroy();
+      await sleep(downMs);
+      fake.up = true;
+    },
     close: async () => {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));

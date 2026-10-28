@@ -1,6 +1,7 @@
 /**
  * The golden scenario of Chips's conformance kit, played against the bridge and a scripted OpenCode
- * that asks before it acts: what `chips conformance custom --capabilities agents,new_agents` checks of it live.
+ * that asks before it acts: what `chips conformance custom --capabilities agents,new_agents,restarts`
+ * checks of it live, running OpenCode's server itself, which a person's Restart restarts.
  */
 
 import { strict as assert } from "node:assert";
@@ -20,9 +21,9 @@ it("passes the golden scenario", async () => {
       beatTimeoutMs: 3000,
       subject: {
         name: "chips-opencode",
-        capabilities: ["agents", "new_agents"],
+        capabilities: ["agents", "new_agents", "restarts"],
         start: async (address) => {
-          client = await connect({ url: address.url, token: address.token });
+          client = await connect({ url: address.url, token: address.token, onRestart: () => bridge?.restart() });
           bridge = new Bridge({
             chips: client,
             opencode: new OpenCodeClient({ url: opencode.url, password: opencode.password }),
@@ -30,6 +31,7 @@ it("passes the golden scenario", async () => {
             home: address.spaceId,
             state: { sessions: {} },
             saveState: () => undefined,
+            restartServer: () => opencode.restart(200),
           });
           await bridge.start();
         },
@@ -50,7 +52,7 @@ it("passes the golden scenario", async () => {
       [
         ["Talks", 1],
         ["Supervised", 1],
-        ["Lives in Chips", 2],
+        ["Lives in Chips", 3],
         ["Managed from Chips", 0],
       ],
     );

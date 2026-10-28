@@ -11,6 +11,7 @@ server (`opencode serve`, 2.0).
 - A copy of an agent a person asks for in another room (Fork) is a copy of its session in its own
   room, in the same folder: it remembers what the agent did there, and from then on the two
   remember apart.
+- Restart on the harness's page restarts the OpenCode server the bridge runs (see [Restart](#restart)).
 
 Apache-2.0. Not published: a local repository until Chips's SDK is.
 
@@ -34,6 +35,7 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | Fork (Chips ADR 0087): a copy of an agent in another room | `POST /api/session/{id}/fork` of the agent's session in its room, which copies what it remembers; then `PATCH /api/session/{id}` names the copy for its room and marks it as the copy's. The copy is registered after it (*Nova · fork* for Nova), `forkedFrom` the original, for the room asked, and works in the original's folder. An ask heard again registers the same copy; an agent that never spoke in its room is copied as a new one with nothing to remember |
 | Not right? on an agent's reply (Chips ADR 0200), or a 👎 from an older device | a run of the agent who said it, in its session for the room, after its turns there: a prompt with its reply, what wasn't right, and to answer again in its place; the goal is *Looking again:* and the note's first line. A 👍, or any other reaction, is nothing |
 | Trouble on the harness | `GET /api/info` every 30 s |
+| Restart (Chips ADR 0094) | the bridge's own `opencode serve` stopped and started again on the same port and password; then `GET /api/info`: fine, or why it isn't back |
 
 OpenCode asks before anything its config and the agent don't allow (its rules fall back to "ask"),
 so its permission asks reach Chips as cards. An `always` there is saved by OpenCode as well; a
@@ -52,6 +54,30 @@ Not yet:
 - Fork for a bridge that joined from the gallery: its card grants `agents` and `new_agents`. A
   bridge that joins with a code asks for `forks` as well.
 - More than one OpenCode server per bridge.
+
+## Restart
+
+Where the bridge runs OpenCode's server itself (no `url` in the config), a person can restart it
+from the harness's page in Chips (Chips ADR 0094). The bridge stops the server and starts it again
+on the same port and password, so its sessions, which OpenCode keeps on disk, go on where they
+were. A server it took up from before, left running by a bridge that was stopped hard, is stopped
+by the process it says it is. The bridge says nothing more until the server answers again, then
+says it is fine. If the server doesn't come back, it says why, in OpenCode's own words where it has
+them, ends the runs that were under way, and Chips offers Restart again. A restart stops whatever
+OpenCode was doing, as Chips's sheet says.
+
+A server you run yourself (`url` in the config) isn't the bridge's to restart. The bridge doesn't
+ask for `restarts` when it joins, and doesn't hear the ask. A harness joined one way and later
+configured the other keeps what it was granted when it joined:
+- Joined running its own server, then given a `url`: Chips still draws Restart, and answers it
+  with "Chips can't reach <its name> to restart it". Turn off *Be restarted from Chips* on the
+  harness's page.
+- Joined with a `url`, then running its own server: the bridge hears restarts, but Chips draws no
+  Restart until you turn on *Be restarted from Chips* on the harness's page.
+
+A link carries what the person chose on it, not what the bridge asks for. The gallery's card for
+OpenCode doesn't grant `restarts` yet, so a bridge joined from it gets Restart once you turn it on
+on its page.
 
 ## From Chips's gallery
 

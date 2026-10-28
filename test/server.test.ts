@@ -1,12 +1,15 @@
 /**
  * OpenCode's server run by the bridge (Chips's setup audit HS-5): started on a port and password
  * it keeps, taken up again when it is still answering, started again when it stops, and stopped
- * with the bridge; what to do when OpenCode isn't installed or won't start. `opencode` here is the
- * fake, on a PATH of its own.
+ * with the bridge; what to do when OpenCode isn't installed or won't start. A person's Restart
+ * (Chips ADR 0094) stops it, the one taken up from before included, and starts it again on the
+ * same port and password, or says why it didn't. `opencode` here is the fake, on a PATH of its own.
  */
 
 import { strict as assert } from "node:assert";
+import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -36,6 +39,25 @@ const answering = async (url: string, password: string) => {
     return false;
   }
 };
+
+/** Whether a process is still there. */
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** A port nothing listens on now. */
+const freePort = () =>
+  new Promise<number>((resolve) => {
+    const probe = createServer().listen(0, "127.0.0.1", () => {
+      const { port } = probe.address() as { port: number };
+      probe.close(() => resolve(port));
+    });
+  });
 
 before(() => {
   root = mkdtempSync(join(tmpdir(), "chips-opencode-server-"));
@@ -88,6 +110,65 @@ describe("the bridge's own OpenCode server", () => {
     await until(() => starts().length > before.length);
     await until(() => answering(server.url, server.password));
     server.stop();
+  });
+
+  it("restarts the one it started on the same port and password, and still stops it with the bridge", async () => {
+    const folder = mkdtempSync(join(root, "f-"));
+    const server = await ownServer({ folder, cwd: folder, env });
+    const first = Number(starts().at(-1));
+    const kept = readFileSync(join(folder, "server.json"), "utf8");
+    await server.restart();
+    const second = Number(starts().at(-1));
+    assert.notEqual(second, first, "started again");
+    assert.ok(!alive(first), "the one before stopped");
+    assert.ok(await answering(server.url, server.password));
+    assert.equal(readFileSync(join(folder, "server.json"), "utf8"), kept, "the same port and password");
+    server.stop();
+    await until(() => !alive(second));
+  });
+
+  it("restarts one it took up from before, by the process it says it is", async () => {
+    const folder = mkdtempSync(join(root, "g-"));
+    const port = await freePort();
+    const password = "left-running-by-a-bridge-stopped-hard";
+    writeFileSync(join(folder, "server.json"), JSON.stringify({ port, password }), { mode: 0o600 });
+    // A server a bridge stopped hard left running: no process of this one's.
+    const left = spawn(join(root, "bin", "opencode"), ["serve", "--hostname", "127.0.0.1", "--port", String(port)], {
+      env: { ...env, OPENCODE_PASSWORD: password },
+      stdio: "ignore",
+    });
+    const gone = new Promise((resolve) => left.once("exit", resolve));
+    const url = `http://127.0.0.1:${port}`;
+    await until(() => answering(url, password));
+    const server = await ownServer({ folder, cwd: folder, env });
+    assert.equal(server.url, url, "taken up");
+    const before = starts().length;
+    await server.restart();
+    await gone;
+    assert.equal(starts().length, before + 1, "started again, by this bridge");
+    assert.ok(await answering(url, password));
+    server.stop();
+    await until(async () => !(await answering(url, password)));
+  });
+
+  it("says why when it doesn't come back from a restart, and comes back from the next", async () => {
+    const folder = mkdtempSync(join(root, "h-"));
+    const own = { ...env };
+    const server = await ownServer({ folder, cwd: folder, env: own, waitMs: 1500 });
+    // OpenCode broke between the two: its config lost a provider, say.
+    own["FAKE_SERVE_FAIL"] = "1";
+    await assert.rejects(
+      server.restart(),
+      (error: unknown) =>
+        error instanceof ServerError &&
+        /^OpenCode's server didn't start again at http:\/\/127\.0\.0\.1:\d+: Error: no provider is configured$/.test(error.message),
+    );
+    assert.ok(!(await answering(server.url, server.password)), "nothing answering");
+    delete own["FAKE_SERVE_FAIL"];
+    await server.restart();
+    assert.ok(await answering(server.url, server.password));
+    server.stop();
+    await until(async () => !(await answering(server.url, server.password)));
   });
 
   it("says to install OpenCode when it isn't on the PATH", async () => {

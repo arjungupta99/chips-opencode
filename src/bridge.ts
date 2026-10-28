@@ -25,6 +25,11 @@
  * A person's Fork (Chips ADR 0087) is a copy of an agent in another room: its session in its room,
  * copied in OpenCode, is the copy's session there, in the original's folder. From then on the two
  * remember apart.
+ *
+ * A person's Restart (Chips ADR 0094), where the bridge runs OpenCode's server itself, stops that
+ * server and starts it again on the same port and password: the client, the rooms' sessions and
+ * the agents go on as they were, and the bridge says how it is once the server is back, or why it
+ * isn't.
  */
 
 import { mkdirSync } from "node:fs";
@@ -84,6 +89,14 @@ export interface BridgeState {
  */
 export const WANTS = ["agents", "new_agents", "forks"] as const;
 
+/**
+ * What it asks for when it joins: `WANTS`, and `restarts` where the bridge runs OpenCode's server
+ * itself (Chips ADR 0094). A server a person runs themselves isn't the bridge's to restart.
+ */
+export function wantsFor(ownServer: boolean): readonly string[] {
+  return ownServer ? [...WANTS, "restarts"] : WANTS;
+}
+
 export interface BridgeOptions {
   readonly chips: Chips;
   readonly opencode: OpenCodeClient;
@@ -108,6 +121,11 @@ export interface BridgeOptions {
   readonly healthEveryMs?: number | undefined;
   /** How long after the event stream drops it is opened again, at first. */
   readonly reconnectMs?: number | undefined;
+  /**
+   * OpenCode's server stopped and started again on the same port and password, for a person's
+   * Restart (Chips ADR 0094): only where the bridge runs it. Throws, in words, when it isn't back.
+   */
+  readonly restartServer?: (() => Promise<void>) | undefined;
 }
 
 /** A folder under `root` named after an agent, `-2` and on when another agent has that one. */
@@ -130,6 +148,8 @@ const ids = createIdGenerator();
 const QUIET_MS = 1500;
 /** Held in a turn's waiting words while an interrupt stops the session, so its end isn't the turn's. */
 const INTERRUPTING = "interrupting";
+/** The most a harness's trouble says (Chips ADR 0083). */
+const TROUBLE_CHARS = 200;
 /** How many feedbacks answered are remembered, so one heard again is nothing: a replay comes soon. */
 const LOOKS_KEPT = 500;
 /** How much of a reply a second look quotes. */
@@ -261,6 +281,12 @@ export class Bridge {
   private health: ReturnType<typeof setInterval> | undefined;
   private readonly listening = new AbortController();
   private connections = 0;
+  /** Opens the event stream again now, rather than once its wait is over. */
+  private wake: (() => void) | undefined;
+  /** A person's Restart under way: nothing is said of how it is meanwhile (Chips ADR 0094). */
+  private restarting: Promise<void> | undefined;
+  /** Why OpenCode's server isn't there, where the bridge knows more than that it doesn't answer. */
+  private why: string | undefined;
 
   constructor(private readonly options: BridgeOptions) {
     this.log = options.log ?? (() => undefined);
@@ -297,6 +323,41 @@ export class Bridge {
   stop(): void {
     if (this.health !== undefined) clearInterval(this.health);
     this.listening.abort();
+  }
+
+  /**
+   * A person's Restart (Chips ADR 0094): the server stopped and started again, then how it is,
+   * fine or why not. Asked again meanwhile, it is the same restart. Nothing where the bridge
+   * doesn't run the server, which never says it hears restarts.
+   */
+  restart(): Promise<void> {
+    this.restarting ??= (async () => {
+      try {
+        await this.restartServer();
+      } finally {
+        this.restarting = undefined;
+      }
+      await this.sayHowItIs();
+    })();
+    return this.restarting;
+  }
+
+  private async restartServer(): Promise<void> {
+    const again = this.options.restartServer;
+    if (again === undefined) return;
+    this.log("a person asked for a restart");
+    try {
+      await again();
+      this.why = undefined;
+      // The event stream opened again now; what was missed meanwhile is read once it is.
+      this.wake?.();
+    } catch (error) {
+      const why = messageOf(error).replace(/\s+/g, " ").trim();
+      this.why = why.length <= TROUBLE_CHARS ? why : `${why.slice(0, TROUBLE_CHARS - 1)}…`;
+      this.log(`OpenCode's server isn't back: ${why}`);
+      // Nothing will answer the turns going: each ends, and says why.
+      for (const turn of this.turns.values()) turn.end({ outcome: "failed", why: "OpenCode didn't come back after a restart" });
+    }
   }
 
   /** The Main agent, the first registered, once started: who says the harness's first words. */
@@ -339,11 +400,17 @@ export class Bridge {
       .catch((error: unknown) => this.log(`${main.name} stays out of its home: ${String(error)}`));
   }
 
-  /** Trouble while the server doesn't answer, and fine once it does (ADR 0083). */
+  /**
+   * Trouble while the server doesn't answer, and fine once it does (ADR 0083). Nothing while a
+   * restart is under way: its end says (ADR 0094).
+   */
   private async sayHowItIs(): Promise<void> {
+    if (this.restarting !== undefined) return;
     const up = await this.options.opencode.healthy();
+    if (this.restarting !== undefined) return;
+    if (up) this.why = undefined;
     const chips = this.options.chips;
-    await (up ? chips.reportOk() : chips.reportTrouble("OpenCode isn't answering")).catch(() => undefined);
+    await (up ? chips.reportOk() : chips.reportTrouble(this.why ?? "OpenCode isn't answering")).catch(() => undefined);
   }
 
   /** OpenCode's event stream, opened again whenever it drops, a little later each time it fails. */
@@ -358,8 +425,15 @@ export class Bridge {
         if (this.listening.signal.aborted) return;
         this.log(`OpenCode's events: ${messageOf(error)}`);
       }
-      await new Promise((resolve) => setTimeout(resolve, wait));
-      wait = Math.min(wait * 2, 15_000);
+      const woken = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), wait);
+        this.wake = () => {
+          clearTimeout(timer);
+          resolve(true);
+        };
+      });
+      this.wake = undefined;
+      wait = woken ? first : Math.min(wait * 2, 15_000);
     }
   }
 

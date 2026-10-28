@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
-import { Bridge, type BridgeState, WANTS } from "./bridge.js";
+import { Bridge, type BridgeState, wantsFor } from "./bridge.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { OpenCodeClient } from "./opencode.js";
 import { type OwnServer, ownServer, ServerError } from "./server.js";
@@ -104,7 +104,7 @@ const joined = await joinChips({
   url: process.env["CHIPS_URL"],
   name: config.name,
   software: "chips-opencode 1.0.0",
-  wants: WANTS,
+  wants: wantsFor(server !== undefined),
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
 }).catch(refused);
 // Joined, `npm run keep` hands over to a copy kept running, which says the hello. It takes the
@@ -116,18 +116,22 @@ const state: BridgeState = existsSync(statePath)
   ? (JSON.parse(readFileSync(statePath, "utf8")) as BridgeState)
   : { sessions: {} };
 
+let bridge: Bridge | undefined;
 const chips = await connect({
   url: joined.url,
   token: joined.token,
   client: { name: "chips-opencode", version: "1.0.0" },
   store: fileStore(join(folder, "chips-state.json")),
+  // A person's Restart (Chips ADR 0094), heard only where the bridge runs OpenCode's server: one a
+  // person runs themselves isn't the bridge's to restart, so this connection doesn't say it hears them.
+  ...(server === undefined ? {} : { onRestart: () => bridge?.restart() }),
 });
 
 // Each agent works on its room's project in a copy of its own (Chips ADR 0221), where git will.
 const git = await checkGit();
 if (!git.ok) log(`rooms' projects are off: ${git.why}`);
 
-const bridge = new Bridge({
+bridge = new Bridge({
   chips,
   opencode,
   projects: git.ok,
@@ -136,6 +140,7 @@ const bridge = new Bridge({
   state,
   saveState: (next) => writeFileSync(statePath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 }),
   log,
+  restartServer: server?.restart,
   ...(config.directory === undefined ? { folders: config.folders } : {}),
 });
 await bridge.start();

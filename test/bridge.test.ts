@@ -23,8 +23,10 @@ import {
   secondLook,
   spoken,
   WANTS,
+  wantsFor,
 } from "../src/bridge.ts";
 import { OpenCodeClient } from "../src/opencode.ts";
+import { ServerError } from "../src/server.ts";
 import { AGAIN, type FakeOpenCode, startFakeOpenCode, THOUGHTFUL } from "./fake-opencode.ts";
 
 interface Rig {
@@ -54,13 +56,21 @@ async function rig(
     folder?: string;
     folders?: string;
     projects?: boolean;
+    /** The bridge runs OpenCode's server, and this restarts it: its connection hears restarts, as `main.ts`'s does. */
+    restartServer?: (opencode: FakeOpenCode) => Promise<void>;
   } = {},
 ): Promise<Rig> {
-  const chips = options.chips ?? (await startFakeChips({ capabilities: ["agents"] }));
+  const restarts = options.restartServer !== undefined;
+  const chips = options.chips ?? (await startFakeChips({ capabilities: restarts ? ["agents", "restarts"] : ["agents"] }));
   if (options.chips === undefined) open.push(() => chips.close());
   const opencode = await startFakeOpenCode(options.folder === undefined ? {} : { directory: options.folder });
   open.push(() => opencode.close());
-  const client = await connect({ url: chips.address.url, token: chips.address.token });
+  let made: Bridge | undefined;
+  const client = await connect({
+    url: chips.address.url,
+    token: chips.address.token,
+    ...(restarts ? { onRestart: () => made?.restart() } : {}),
+  });
   const state = options.state ?? { sessions: {} };
   const lines: string[] = [];
   const bridge = new Bridge({
@@ -75,7 +85,9 @@ async function rig(
     log: (line) => lines.push(line),
     ...(options.folders === undefined ? {} : { folders: options.folders }),
     ...(options.projects === undefined ? {} : { projects: options.projects }),
+    ...(options.restartServer === undefined ? {} : { restartServer: () => options.restartServer?.(opencode) ?? Promise.resolve() }),
   });
+  made = bridge;
   open.push(async () => {
     bridge.stop();
     client.close();
@@ -785,6 +797,72 @@ describe("a copy a person asks for (Chips ADR 0087, Fork)", () => {
     assert.ok(WANTS.includes("forks"));
     assert.equal(forkName("Nova"), "Nova · fork");
     assert.equal(forkName("Nova · fork 2"), "Nova · fork");
+  });
+});
+
+describe("a person's Restart (Chips ADR 0094)", () => {
+  it("restarts the server it runs, says nothing meanwhile, then says it is fine and goes on in the room's session", async () => {
+    let quiet: number | undefined;
+    let backAt = 0;
+    const { chips, opencode, lines } = await rig({
+      restartServer: async (server) => {
+        // Down, and a moment for a word already on its way to land; then nothing more until it is back.
+        const down = server.restart(400);
+        await sleep(100);
+        const said = chips.statuses().length;
+        await down;
+        quiet = chips.statuses().length - said;
+        backAt = chips.statuses().length;
+      },
+    });
+    await chips.say("start the notes");
+    const first = await sent(chips, "run.completed");
+    const session = opencode.created[0]?.id;
+    assert.equal(chips.askToRestart(), 1, "its connection hears restarts");
+    await until(() => backAt > 0, 3000);
+    assert.equal(quiet, 0, "nothing said while it restarts");
+    await until(() => chips.statuses().length > backAt);
+    assert.equal(chips.statuses()[backAt]?.state, "ok", "fine, once it is back");
+    assert.ok(lines.includes("a person asked for a restart"));
+    // The same client, the same session: it remembers what was said before the restart.
+    await chips.say("recall");
+    const second = await sent(chips, "run.completed", (event) => event.run_id !== first.run_id);
+    const answer = await reply(chips, second.run_id);
+    assert.match(String(answer.payload["text"]), /^First said here: .*start the notes$/);
+    assert.equal(opencode.created.length, 1, "no new session");
+    assert.equal(opencode.prompts.at(-1)?.sessionId, session);
+  });
+
+  it("says why when the server doesn't come back, ends the turn going, and says so until it answers", async () => {
+    const { chips, opencode } = await rig({
+      restartServer: async (server) => {
+        server.up = false;
+        throw new ServerError("OpenCode's server didn't start again at http://127.0.0.1:4096:\n Error: no provider is configured");
+      },
+    });
+    const why = "OpenCode's server didn't start again at http://127.0.0.1:4096: Error: no provider is configured";
+    await chips.say("slow");
+    const started = await sent(chips, "run.started");
+    // Under way in OpenCode, the words taken.
+    await sent(chips, "run.status", (event) => event.run_id === started.run_id);
+    assert.equal(chips.askToRestart(), 1);
+    const failed = await sent(chips, "run.failed", (event) => event.run_id === started.run_id);
+    assert.equal(failed.payload["error"], "OpenCode: OpenCode didn't come back after a restart");
+    await until(() => chips.statuses().at(-1)?.reason === why);
+    assert.equal(chips.statuses().at(-1)?.state, "trouble");
+    // The health checks after it keep its words, not a vaguer line.
+    await sleep(200);
+    assert.ok(chips.statuses().slice(-3).every((status) => status.reason === why));
+    opencode.up = true;
+    await until(() => chips.statuses().at(-1)?.state === "ok");
+  });
+
+  it("asks for restarts, and hears them, only where it runs the server", async () => {
+    assert.ok(wantsFor(true).includes("restarts"));
+    assert.deepEqual(wantsFor(false), WANTS);
+    // A server a person runs themselves: connected as `main.ts` connects for one, nothing hears the ask.
+    const { chips } = await rig();
+    assert.equal(chips.askToRestart(), 0);
   });
 });
 
