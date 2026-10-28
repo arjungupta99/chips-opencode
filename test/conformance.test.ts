@@ -1,6 +1,6 @@
 /**
  * The golden scenario of Chips's conformance kit, played against the bridge and a scripted OpenCode
- * that asks before it acts: what `chips conformance custom --capabilities agents,new_spaces,new_agents,restarts`
+ * that asks before it acts: what `chips conformance custom --capabilities agents,new_spaces,new_agents,restarts,models`
  * checks of it live, running OpenCode's server itself, which a person's Restart restarts.
  */
 
@@ -8,7 +8,7 @@ import { strict as assert } from "node:assert";
 import { it } from "node:test";
 import { formatReport, runConformance } from "@chipschat/conformance";
 import { type Chips, connect } from "@chipschat/harness";
-import { Bridge } from "../src/bridge.ts";
+import { Bridge, settingsFor } from "../src/bridge.ts";
 import { OpenCodeClient } from "../src/opencode.ts";
 import { startFakeOpenCode } from "./fake-opencode.ts";
 
@@ -21,9 +21,14 @@ it("passes the golden scenario", async () => {
       beatTimeoutMs: 3000,
       subject: {
         name: "chips-opencode",
-        capabilities: ["agents", "new_spaces", "new_agents", "restarts"],
+        capabilities: ["agents", "new_spaces", "new_agents", "restarts", "models"],
         start: async (address) => {
-          client = await connect({ url: address.url, token: address.token, onRestart: () => bridge?.restart() });
+          client = await connect({
+            url: address.url,
+            token: address.token,
+            onRestart: () => bridge?.restart(),
+            settings: settingsFor(() => bridge),
+          });
           bridge = new Bridge({
             chips: client,
             opencode: new OpenCodeClient({ url: opencode.url, password: opencode.password }),
@@ -53,9 +58,11 @@ it("passes the golden scenario", async () => {
         ["Talks", 1],
         ["Supervised", 1],
         ["Lives in Chips", 4],
-        ["Managed from Chips", 0],
+        ["Managed from Chips", 1],
       ],
     );
+    const managed = Object.fromEntries((report.levels[3]?.capabilities ?? []).map((each) => [each.capability, each.outcome]));
+    assert.deepEqual(managed, { models: "passed" });
   } finally {
     await opencode.close();
   }

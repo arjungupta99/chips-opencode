@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
-import { Bridge, type BridgeState, wantsFor } from "./bridge.js";
+import { Bridge, type BridgeState, settingsFor, wantsFor } from "./bridge.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { OpenCodeClient } from "./opencode.js";
 import { type OwnServer, ownServer, ServerError } from "./server.js";
@@ -125,6 +125,8 @@ const chips = await connect({
   // A person's Restart (Chips ADR 0094), heard only where the bridge runs OpenCode's server: one a
   // person runs themselves isn't the bridge's to restart, so this connection doesn't say it hears them.
   ...(server === undefined ? {} : { onRestart: () => bridge?.restart() }),
+  // What a person changes of an agent from its page (Chips ADR 0241): its model.
+  settings: settingsFor(() => bridge),
 });
 
 // Each agent works on its room's project in a copy of its own (Chips ADR 0221), where git will.

@@ -14,6 +14,7 @@ server (`opencode serve`, 2.0).
   room, in the same folder: it remembers what the agent did there, and from then on the two
   remember apart.
 - Restart on the harness's page restarts the OpenCode server the bridge runs (see [Restart](#restart)).
+- Each agent's page shows its model, which a person may change there (see [Models](#models)).
 
 Apache-2.0. Not published: a local repository until Chips's SDK is.
 
@@ -30,6 +31,7 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | Files in the reply | each `MEDIA:<path>` line of its own in the answer, taken out of the words and sent from the session's folder (the agent's own), as OpenCode says it (each turn is told how); a file outside it is refused, and the reply says so |
 | Cost and tokens | each model call's `session.step.ended`: OpenCode's own cost, as a step's share |
 | The context gauge | the last call's tokens against the model's window from `GET /api/model` |
+| An agent's model (Chips ADR 0241) | the models `GET /api/model` lists that OpenCode runs, each with its variants as levels; a person's pick put on the agent's session before its next message with `POST /api/session/{id}/model` (see [Models](#models)) |
 | An approval card | `permission.asked` → `POST …/permission/{id}/reply`: `always` when a person said always, else `once`, and `once` for a command, which Chips remembers by how each part starts (Chips ADR 0239); `reject` with their reason for a no. One answered in OpenCode's own apps is settled in Chips (ADR 0079) |
 | A question | a `form.created` whose fields are choices or yes-or-no, at most four → `POST …/form/{id}/reply` |
 | Stop | `POST …/interrupt`, and the words OpenCode hasn't taken yet taken back |
@@ -53,10 +55,26 @@ Not yet:
   OpenCode's own apps.
 - A question answered in OpenCode's own apps stays open in Chips. The protocol has no way to take
   one back yet.
-- OpenCode's models as the agent's Model group in Chips. Its commands, skills and context files.
+- OpenCode's commands, skills and context files in Chips.
 - Fork for a bridge that joined from the gallery: its card grants `agents` and `new_agents`. A
   bridge that joins with a code asks for `new_spaces` and `forks` as well.
 - More than one OpenCode server per bridge.
+
+## Models
+
+An agent's Model group in Chips (Chips ADR 0241) offers the models OpenCode's server runs: those
+of the providers it is set up with (`GET /api/model`), less any disabled or retired, at most 40.
+Each model's levels are its variants in OpenCode (`low`, `high`, `max` and so on), lowest first.
+
+What an agent runs on, with no model of its own picked in Chips, is its `model` in the bridge's
+config ("As in config.json"), else its OpenCode agent's model (`GET /api/agent`), else the server's
+default (`GET /api/model/default`): "OpenCode's default". A person's pick, a model and a level, is
+kept in `sessions.json`, not written into OpenCode's config. Before each message for the agent the
+bridge puts the session it goes to on it (`POST /api/session/{id}/model`), where it isn't on it
+already, and a new session is made on it. Picking the default again puts the agent's sessions back
+on that before their next message. A copy made by Fork runs on what its original runs on. OpenCode
+takes any model there, so the bridge refuses one its catalogue doesn't run, and a level its model
+doesn't have, in so many words.
 
 ## Restart
 

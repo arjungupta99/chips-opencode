@@ -32,12 +32,27 @@
  * server and starts it again on the same port and password: the client, the rooms' sessions and
  * the agents go on as they were, and the bridge says how it is once the server is back, or why it
  * isn't.
+ *
+ * Each agent's page in Chips shows its model (Chips ADR 0241, `models.ts`): one of the models
+ * OpenCode's server runs, at one of its levels, picked there and kept here, and given to each
+ * session of the agent's before its next message.
  */
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { Agent, ApprovalInput, Chips, Decision, Project, Run, SpaceAsked, Speaker } from "@chipschat/harness";
-import { heldNote, promptFor, pushedInWords, sendAnswer } from "@chipschat/harness";
+import type {
+  Agent,
+  AgentModelCopy,
+  ApprovalInput,
+  Chips,
+  Decision,
+  Project,
+  Run,
+  SettingsHandlers,
+  SpaceAsked,
+  Speaker,
+} from "@chipschat/harness";
+import { heldNote, promptFor, pushedInWords, Refuse, sendAnswer } from "@chipschat/harness";
 import {
   type AgentAsked,
   type AgentFork,
@@ -45,9 +60,11 @@ import {
   FORK_WAIT_MS,
   type Feedback,
   type MessageNew,
+  type ModelChangeFrame,
   type ProjectFacts,
   type StepKind,
 } from "@chipschat/protocol";
+import { type Fallback, type ModelPick, modelCopy, pickOf, refOf, sameModel, writtenOf } from "./models.js";
 import {
   type FormAnswer,
   type ModelRef,
@@ -82,15 +99,17 @@ export interface BridgeState {
    * heard again copies nothing more.
    */
   forks?: Record<string, { readonly session?: string; readonly folder?: string }>;
+  /** Each agent's own model and level, picked in Chips (Chips ADR 0241), by whose sessions they are. */
+  models?: Record<string, ModelPick>;
 }
 
 /**
  * What the harness asks Chips to let it do, when it joins with a code: have agents of its own
  * (Chips ADR 0087), take a space a person asks for from the + (ADR 0241), make a new one a person
- * asks for in a room (ADR 0108), and copy one for a person's Fork. A link carries what the person
- * chose instead.
+ * asks for in a room (ADR 0108), copy one for a person's Fork, and show each one's model (ADR
+ * 0241). A link carries what the person chose instead.
  */
-export const WANTS = ["agents", "new_spaces", "new_agents", "forks"] as const;
+export const WANTS = ["agents", "new_spaces", "new_agents", "forks", "models"] as const;
 
 /**
  * What it asks for when it joins: `WANTS`, and `restarts` where the bridge runs OpenCode's server
@@ -321,6 +340,10 @@ export class Bridge {
     chips.on("feedback", (feedback) => {
       this.notRight(feedback).catch((error: unknown) => this.log(`a second look went wrong: ${messageOf(error)}`));
     });
+    // Each agent's model as OpenCode has it now (Chips ADR 0241).
+    for (const agent of await chips.agents.list().catch(() => [])) {
+      if (agent.state !== "archived") await this.sendModel(agent.agentId);
+    }
     await this.sayHowItIs();
     this.health = setInterval(() => void this.sayHowItIs(), this.options.healthEveryMs ?? 30_000);
     this.health.unref();
@@ -459,6 +482,7 @@ export class Bridge {
     });
     this.ours.add(agent.agentId);
     this.log(`${agent.name} made${agent.attached === false ? `, not in the room: ${agent.why ?? "too late"}` : ""}`);
+    await this.sendModel(agent.agentId);
   }
 
   /**
@@ -480,6 +504,7 @@ export class Bridge {
     }
     this.ours.add(agent.agentId);
     this.log(`${agent.name} claimed ${spaceId}`);
+    await this.sendModel(agent.agentId);
     // Who said them, as the space's lines name them, with their standing (Chips SEC-49).
     const context = await chips.roomContext(spaceId, { limit: 20 }).catch(() => undefined);
     const said = context?.lines.find((line) => line.message_id === firstMessage.messageId)?.from;
@@ -563,6 +588,9 @@ export class Bridge {
     this.ours.add(copy.agentId);
     if (kept.session !== undefined) state.sessions[`${copy.agentId}|${spaceId}`] = kept.session;
     if (kept.folder !== undefined) state.folders = { ...state.folders, [copy.agentId]: kept.folder };
+    // It runs on what its original runs on: a session copied keeps its model, and so does the agent.
+    const pick = state.models?.[who];
+    if (pick !== undefined) state.models = { ...state.models, [copy.agentId]: pick };
     saveState(state);
     if (copied !== undefined) {
       // The copy came with the original's room and name: it is called and marked for its own.
@@ -578,6 +606,7 @@ export class Bridge {
         // Not in the room, and no why: it is there already, from the ask heard before.
         `${copy.attached === false && copy.why !== undefined ? `; not in the room: ${copy.why}` : ""}`,
     );
+    void this.sendModel(copy.agentId);
   }
 
   /** The session of an agent's to copy: its room's, or where it is in none, the last it had. */
@@ -585,6 +614,99 @@ export class Bridge {
     const { sessions } = this.options.state;
     if (room !== undefined && room !== null) return sessions[`${who}|${room}`];
     return Object.entries(sessions).findLast(([id]) => id.startsWith(`${who}|`))?.[1];
+  }
+
+  // ------------------------------------------------------------------ what a person changes from an agent's page
+
+  /**
+   * Which OpenCode agent a Chips agent of the harness's runs as, and whose its sessions and its
+   * pick are, as `roomOf` says: the key of one configured here, else its Chips id. Nothing for an
+   * agent not the harness's.
+   */
+  private async whoseIs(agentId: string): Promise<{ agent: Running; who: string } | undefined> {
+    const agent = await this.runnerOf(agentId);
+    if (agent === undefined || agentId === this.options.chips.harnessId) return undefined;
+    return { agent, who: agentId === agent.agentId ? agent.key : agentId };
+  }
+
+  /**
+   * What an agent runs on with no pick of its own: its model in the bridge's config, else its
+   * OpenCode agent's, else the server's default.
+   */
+  private async fallbackOf(agent: Running): Promise<Fallback | undefined> {
+    if (agent.model !== undefined) return { model: agent.model, label: "As in config.json" };
+    const { opencode } = this.options;
+    const own = (await opencode.agents().catch(() => [])).find((each) => each.id === agent.config.agent)?.model;
+    if (own !== undefined) return { model: own, label: "OpenCode's default" };
+    const model = await opencode.defaultModel();
+    return model === undefined ? undefined : { model: { providerID: model.providerID, id: model.id }, label: "OpenCode's default" };
+  }
+
+  /** An agent's model, as OpenCode and the bridge have it now: nothing for an agent not the harness's. */
+  private async modelCopyOf(agentId: string): Promise<AgentModelCopy | undefined> {
+    const whose = await this.whoseIs(agentId);
+    if (whose === undefined) return undefined;
+    const [catalogue, fallback] = await Promise.all([this.options.opencode.models(), this.fallbackOf(whose.agent)]);
+    return modelCopy({ catalogue, pick: this.options.state.models?.[whose.who], fallback });
+  }
+
+  /** An agent's model sent, where it changed since it last was (Chips takes the same copy once). */
+  private async sendModel(agentId: string): Promise<void> {
+    try {
+      const copy = await this.modelCopyOf(agentId);
+      if (copy !== undefined) await this.options.chips.settings.model(agentId, copy);
+    } catch (error) {
+      this.log(`the model of ${agentId} not sent: ${messageOf(error)}`);
+    }
+  }
+
+  /**
+   * A person's pick of an agent's model and level from its page (Chips ADR 0241): kept with the
+   * bridge's state, and given to each of its sessions before its next message there. Only a model
+   * OpenCode runs, at one of its levels; `null` is its default again. Answered with its copy.
+   */
+  async modelChanged(change: ModelChangeFrame): Promise<AgentModelCopy> {
+    const whose = await this.whoseIs(change.agent_id);
+    if (whose === undefined) throw new Refuse("This harness has no such agent.");
+    const { opencode, state, saveState } = this.options;
+    let pick: ModelPick | null;
+    try {
+      pick = pickOf(change, await opencode.models());
+    } catch (error) {
+      throw new Refuse(messageOf(error), await this.modelCopyOf(change.agent_id).catch(() => undefined));
+    }
+    const models = { ...state.models };
+    if (pick === null) delete models[whose.who];
+    else models[whose.who] = pick;
+    state.models = models;
+    saveState(state);
+    const name = await this.nameOf(whose);
+    this.log(`${name} runs on ${pick === null ? "its default" : `${pick.model}${pick.effort === undefined ? "" : ` at ${pick.effort}`}`}, from Chips`);
+    const copy = await this.modelCopyOf(change.agent_id);
+    if (copy === undefined) throw new Refuse("OpenCode names no model for it.");
+    return copy;
+  }
+
+  /**
+   * The session a message goes to, put on the model its agent runs on, where it isn't on it
+   * already (Chips ADR 0241): its pick, else its model in the bridge's config. A session that was
+   * put on another before, with neither now, goes back to its OpenCode agent's or the server's.
+   */
+  private async modelled(sessionId: string, { who, agent }: Pick<Room, "who" | "agent">): Promise<void> {
+    const { opencode, state } = this.options;
+    const pick = state.models?.[who];
+    try {
+      const has = (await opencode.session(sessionId))["model"] as ModelRef | undefined;
+      const want = pick !== undefined ? refOf(pick) : (agent.model ?? (has === undefined ? undefined : (await this.fallbackOf(agent))?.model));
+      if (want === undefined || sameModel(want, has)) return;
+      await opencode.setModel(sessionId, want);
+      this.log(`${sessionId} runs on ${writtenOf(want)}${want.variant === undefined ? "" : ` at ${want.variant}`} from now`);
+    } catch (error) {
+      // A session OpenCode no longer has is made again, on the right model, when the words find it gone.
+      if (!(error instanceof OpenCodeError && error.tag === "SessionNotFoundError")) {
+        this.log(`${sessionId} stays on its model: ${messageOf(error)}`);
+      }
+    }
   }
 
   // ------------------------------------------------------------------ what is said to it
@@ -736,6 +858,8 @@ export class Bridge {
     if (this.turns.get(sessionId) === turn) this.turns.delete(sessionId);
     if (last.outcome === "succeeded") await this.finish(turn);
     else await this.ended(turn, last);
+    // What OpenCode offers may have changed meanwhile: a provider set up, a model added.
+    await this.sendModel(speakerId ?? agent.agentId);
   }
 
   /** The words into the room's session: the one it had, or a new one when OpenCode no longer has it. */
@@ -749,16 +873,18 @@ export class Bridge {
     }
     if (kept !== undefined) {
       try {
+        await this.modelled(kept, { who, agent });
         return { sessionId: kept, given: await this.prompted(kept, text) };
       } catch (error) {
         if (!(error instanceof OpenCodeError && error.tag === "SessionNotFoundError")) throw error;
         this.log(`${agent.config.name}'s session for ${spaceId} is gone from OpenCode: a new one`);
       }
     }
+    const pick = state.models?.[who];
     const made = await opencode.newSession({
       title: `Chips space ${spaceId}`,
       agent: agent.config.agent,
-      model: agent.model,
+      model: pick === undefined ? agent.model : refOf(pick),
       directory: await this.folderFor({ who, agent }),
       metadata: { chips_space: spaceId, chips_agent: who },
     });
@@ -1296,6 +1422,21 @@ export class Bridge {
     if (!run.over) await run.fail({ error, retryable }).catch(() => undefined);
     if (retryable) void this.sayHowItIs();
   }
+}
+
+/**
+ * What a person changes of the harness's agents from their pages, made by the bridge once it is
+ * running: each agent's model (Chips ADR 0241).
+ */
+export function settingsFor(bridge: () => Bridge | undefined): SettingsHandlers {
+  const active = (): Bridge => {
+    const running = bridge();
+    if (running === undefined) throw new Refuse("The harness is still starting.");
+    return running;
+  };
+  return {
+    models: (change) => active().modelChanged(change),
+  };
 }
 
 // ------------------------------------------------------------------ small words

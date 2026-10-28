@@ -22,6 +22,10 @@
  * With `askFirst`, the first session it made asks before it answers, as the golden scenario needs;
  * a space the scenario asks for from the + answers at once.
  *
+ * Its catalogue is two models of `nous` it runs, one with levels, and one of `lathe` that is
+ * disabled; Heron 2 is its default, and its `plan` agent runs on Heron Mini. A session runs on the
+ * model it was made with or last switched to, which OpenCode takes whatever it is.
+ *
  * Restarted, its event streams are cut and nothing answers for a while; its sessions are kept, as
  * OpenCode keeps them on disk.
  */
@@ -43,6 +47,8 @@ interface FakeSession {
   readonly inbox: Item[];
   /** The folder it was made to work in, when it was given one. */
   readonly directory?: string;
+  /** The model it was made with or last switched to. */
+  model?: unknown;
   title?: unknown;
   metadata?: unknown;
   /** What it remembers: each person's words it took, and each answer, in order. */
@@ -81,10 +87,28 @@ export interface Forked {
   readonly to: string;
 }
 
+/** The models it offers, as `GET /api/model` lists them. */
+export const CATALOGUE = [
+  {
+    id: "heron-2",
+    modelID: "heron-2",
+    providerID: "nous",
+    name: "Heron 2",
+    enabled: true,
+    status: "active",
+    variants: [{ id: "low" }, { id: "medium" }, { id: "high" }, { id: "xhigh" }],
+    limit: { context: 200_000, output: 8000 },
+  },
+  { id: "heron-mini", modelID: "heron-mini", providerID: "nous", name: "Heron Mini", enabled: true, status: "active", variants: [], limit: { context: 100_000, output: 4000 } },
+  { id: "quill-1", modelID: "quill-1", providerID: "lathe", name: "Quill 1", enabled: false, status: "active", variants: [], limit: { context: 50_000, output: 4000 } },
+];
+
 export interface FakeOpenCode {
   readonly url: string;
   readonly password: string;
   readonly created: Created[];
+  /** Each session switched onto a model (`POST /api/session/{id}/model`). */
+  readonly switched: { sessionId: string; model: unknown }[];
   readonly forks: Forked[];
   /** Each change a session's title or metadata was given. */
   readonly updates: { sessionId: string; title: unknown; metadata: unknown }[];
@@ -125,6 +149,7 @@ export async function startFakeOpenCode(
   const fake: Omit<FakeOpenCode, "url" | "close" | "forget" | "historyOf" | "restart"> = {
     password,
     created: [],
+    switched: [],
     forks: [],
     updates: [],
     prompts: [],
@@ -143,10 +168,11 @@ export async function startFakeOpenCode(
   const tokens = { input: 1000, output: 40, reasoning: 10, cache: { read: 200, write: 0 } };
   const model = { providerID: "nous", id: "heron-2" };
 
-  /** One model call: its message's start, what it says and does, and its cost. */
-  const step = async (session: FakeSession, does: (message: string) => Promise<void>, of = model) => {
+  /** One model call, on the session's model: its message's start, what it says and does, and its cost. */
+  const step = async (session: FakeSession, does: (message: string) => Promise<void>, of?: unknown) => {
     const message = next("msg");
-    emit("session.step.started", { sessionID: session.id, assistantMessageID: message, agent: session.agent, model: of, started: Date.now() });
+    const on = of ?? session.model ?? model;
+    emit("session.step.started", { sessionID: session.id, assistantMessageID: message, agent: session.agent, model: on, started: Date.now() });
     await does(message);
     emit("session.step.ended", { sessionID: session.id, assistantMessageID: message, finish: "stop", cost: 0.0042, tokens });
   };
@@ -163,6 +189,8 @@ export async function startFakeOpenCode(
   const toolDone = (session: FakeSession, message: string, id: string, text: string) =>
     emit("session.tool.success", { sessionID: session.id, assistantMessageID: message, id, content: [{ type: "text", text }], executed: false });
   const waitFor = (id: string) => new Promise<unknown>((resolve) => answers.set(id, resolve));
+  /** A session's model as OpenCode keeps it: given no level, its level is `default`. */
+  const leveled = (given: unknown) => ({ variant: "default", ...(given as Record<string, unknown>) });
 
   /** Steering words waiting in the inbox, taken at a step's end. */
   const steerIn = (session: FakeSession) => {
@@ -360,16 +388,12 @@ export async function startFakeOpenCode(
           location: { directory: "/work" },
           data: [
             { id: "build", name: "Build", mode: "primary", hidden: false },
-            { id: "plan", name: "Plan", mode: "primary", hidden: false },
+            { id: "plan", name: "Plan", mode: "primary", hidden: false, model: { providerID: "nous", id: "heron-mini" } },
           ],
         });
       }
-      if (method === "GET" && path === "/api/model") {
-        return json(response, 200, {
-          location: { directory: "/work" },
-          data: [{ id: "heron-2", modelID: "heron-2", providerID: "nous", name: "Heron 2", limit: { context: 200_000, output: 8000 } }],
-        });
-      }
+      if (method === "GET" && path === "/api/model") return json(response, 200, { location: { directory: "/work" }, data: CATALOGUE });
+      if (method === "GET" && path === "/api/model/default") return json(response, 200, { location: { directory: "/work" }, data: CATALOGUE[0] });
       if (method === "GET" && path === "/api/event") {
         response.writeHead(200, { "content-type": "text/event-stream" });
         response.write(`data: ${JSON.stringify({ id: next("evt"), type: "server.connected", data: {} })}\n\n`);
@@ -390,6 +414,7 @@ export async function startFakeOpenCode(
           agent: String(body["agent"] ?? "build"),
           inbox: [],
           ...(typeof own === "string" ? { directory: own } : {}),
+          ...(body["model"] === undefined ? {} : { model: leveled(body["model"]) }),
           title: body["title"],
           metadata: body["metadata"],
           history: [],
@@ -408,7 +433,14 @@ export async function startFakeOpenCode(
       const rest = route[2];
       if (method === "GET" && rest === undefined) {
         return json(response, 200, {
-          data: { id: session.id, outcome: session.outcome, title: session.title, metadata: session.metadata, location: { directory: session.directory ?? directory } },
+          data: {
+            id: session.id,
+            outcome: session.outcome,
+            title: session.title,
+            metadata: session.metadata,
+            ...(session.model === undefined ? {} : { model: session.model }),
+            location: { directory: session.directory ?? directory },
+          },
         });
       }
       if (method === "GET" && rest === "inbox") return json(response, 200, { data: session.inbox.map((item) => ({ id: item.id })) });
@@ -433,6 +465,7 @@ export async function startFakeOpenCode(
           agent: session.agent,
           inbox: [],
           ...(session.directory === undefined ? {} : { directory: session.directory }),
+          ...(session.model === undefined ? {} : { model: session.model }),
           title,
           metadata: session.metadata,
           history: [...session.history],
@@ -457,6 +490,11 @@ export async function startFakeOpenCode(
             location: { directory: session.directory ?? directory },
           },
         });
+      }
+      if (method === "POST" && rest === "model") {
+        fake.switched.push({ sessionId: session.id, model: body["model"] });
+        session.model = leveled(body["model"]);
+        return json(response, 204);
       }
       if (method === "POST" && rest === "prompt") {
         const item: Item = { id: next("msg"), text: String(body["text"]), delivery: typeof body["delivery"] === "string" ? body["delivery"] : undefined, parked: false };

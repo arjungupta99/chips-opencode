@@ -40,13 +40,22 @@ export interface AgentInfo {
   readonly mode: "primary" | "subagent" | "all";
   readonly hidden: boolean;
   readonly description?: string | undefined;
+  /** The model its config gives it, when it gives one. */
+  readonly model?: ModelRef | undefined;
 }
 
+/**
+ * A model of the catalogue: those of the providers the server is set up with. `variants` are its
+ * reasoning levels, as a session's model names one, lowest first; a disabled one isn't run.
+ */
 export interface ModelInfo {
   readonly id: string;
   readonly providerID: string;
   readonly name: string;
-  readonly limit: { readonly context: number };
+  readonly limit: { readonly context: number; readonly input?: number | undefined; readonly output?: number | undefined };
+  readonly variants?: readonly { readonly id: string }[] | undefined;
+  readonly enabled?: boolean | undefined;
+  readonly status?: string | undefined;
 }
 
 export type PermissionDecision = "once" | "always" | "reject";
@@ -104,6 +113,21 @@ export class OpenCodeClient {
 
   async models(): Promise<ModelInfo[]> {
     return (await this.catalogue("model")) as ModelInfo[];
+  }
+
+  /** The model a session with none of its own runs on, when the server has one. */
+  async defaultModel(): Promise<ModelInfo | undefined> {
+    const read = await this.call("GET", `/api/model/default${this.where()}`);
+    const data = read["data"];
+    return typeof data === "object" && data !== null ? (data as ModelInfo) : undefined;
+  }
+
+  /**
+   * The model a session runs on from its next model call. OpenCode takes any model and level
+   * here, one it can't run among them, so the bridge asks only for those of its catalogue.
+   */
+  async setModel(sessionId: string, model: ModelRef): Promise<void> {
+    await this.call("POST", `/api/session/${encodeURIComponent(sessionId)}/model`, { model });
   }
 
   /**
