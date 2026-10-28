@@ -18,6 +18,9 @@ server (`opencode serve`, 2.0).
   change there, and how full its context window is, which a person may compact from there (see
   [Models](#models), [Context files](#context-files) and [Context window](#context-window)).
 
+A bridge that joins with a code asks for all of these. One that joined from Chips's gallery does
+what its card grants: a link carries what the person chose on it, not what the bridge asks for.
+
 Apache-2.0. Not published: a local repository until Chips's SDK is.
 
 ## What Chips shows
@@ -60,8 +63,6 @@ Not yet:
 - A question answered in OpenCode's own apps stays open in Chips. The protocol has no way to take
   one back yet.
 - OpenCode's commands and skills in Chips.
-- Fork for a bridge that joined from the gallery: its card grants `agents` and `new_agents`. A
-  bridge that joins with a code asks for `new_spaces` and `forks` as well.
 - More than one OpenCode server per bridge.
 
 ## Models
@@ -138,9 +139,8 @@ configured the other keeps what it was granted when it joined:
 - Joined with a `url`, then running its own server: the bridge hears restarts, but Chips draws no
   Restart until you turn on *Be restarted from Chips* on the harness's page.
 
-A link carries what the person chose on it, not what the bridge asks for. The gallery's card for
-OpenCode doesn't grant `restarts` yet, so a bridge joined from it gets Restart once you turn it on
-on its page.
+The gallery's card for OpenCode grants `restarts`, so a bridge joined from it before the card did
+gets Restart once you turn it on on its page.
 
 ## From Chips's gallery
 
