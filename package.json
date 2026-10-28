@@ -1,6 +1,6 @@
 {
   "name": "@chipschat/opencode",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "OpenCode as a Chips harness, on its V2 server (opencode serve): each OpenCode agent a Chips agent, each room an OpenCode session.",
   "license": "Apache-2.0",
   "type": "module",
