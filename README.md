@@ -27,7 +27,7 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | Files in the reply | each `MEDIA:<path>` line of its own in the answer, taken out of the words and sent from the session's folder (the agent's own), as OpenCode says it (each turn is told how); a file outside it is refused, and the reply says so |
 | Cost and tokens | each model call's `session.step.ended`: OpenCode's own cost, as a step's share |
 | The context gauge | the last call's tokens against the model's window from `GET /api/model` |
-| An approval card | `permission.asked` → `POST …/permission/{id}/reply`: `always` when a person said always, else `once`; `reject` with their reason for a no. One answered in OpenCode's own apps is settled in Chips (ADR 0079) |
+| An approval card | `permission.asked` → `POST …/permission/{id}/reply`: `always` when a person said always, else `once`, and `once` for a command, which Chips remembers by how each part starts (Chips ADR 0239); `reject` with their reason for a no. One answered in OpenCode's own apps is settled in Chips (ADR 0079) |
 | A question | a `form.created` whose fields are choices or yes-or-no, at most four → `POST …/form/{id}/reply` |
 | Stop | `POST …/interrupt`, and the words OpenCode hasn't taken yet taken back |
 | A steer, a follow-up, an interrupt | a prompt with `delivery: "steer"`; with `"queue"`; interrupt, then a prompt |
@@ -36,7 +36,8 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | Trouble on the harness | `GET /api/info` every 30 s |
 
 OpenCode asks before anything its config and the agent don't allow (its rules fall back to "ask"),
-so its permission asks reach Chips as cards. An `always` there is saved by OpenCode as well.
+so its permission asks reach Chips as cards. An `always` there is saved by OpenCode as well; a
+command never gets one, so the next command comes back to Chips, whose rule answers it.
 
 When the event stream drops, OpenCode doesn't replay what was missed. When it's back, the bridge
 reads each turn's session: which words were taken, whether it is still working, and how its last

@@ -433,7 +433,7 @@ describe("a turn", () => {
 });
 
 describe("what it asks", () => {
-  it("asks on a card by the step, and gives OpenCode the person's always", async () => {
+  it("asks on a card by the step, and gives OpenCode a command's Always as once (Chips ADR 0239)", async () => {
     const { chips, opencode } = await rig();
     await chips.say("ask first");
     const asked = await sent(chips, "approval.request");
@@ -441,10 +441,11 @@ describe("what it asks", () => {
     assert.deepEqual(asked.payload["action"], { kind: "shell.exec", input: { command: "npm test" } });
     assert.equal(asked.payload["step_id"], "call_1");
     await chips.decide(String(asked.payload["approval_id"]), "approved", { scope: "always" });
-    assert.equal((await reply(chips, asked.run_id)).payload["text"], "Given: always");
+    // Chips remembers how the command starts and answers the next one itself.
+    assert.equal((await reply(chips, asked.run_id)).payload["text"], "Given: once");
     const executed = await sent(chips, "approval.executed");
     assert.equal(executed.payload["outcome"], "executed", "the allowed call said how it went");
-    assert.deepEqual(opencode.permissionReplies, [{ requestId: "per_1", decision: "always", message: undefined }]);
+    assert.deepEqual(opencode.permissionReplies, [{ requestId: "per_1", decision: "once", message: undefined }]);
   });
 
   it("gives OpenCode reject, and the person's reason, when they say no", async () => {
@@ -484,6 +485,9 @@ describe("what it asks", () => {
     assert.equal(decisionOf(decision("always")), "always");
     assert.equal(decisionOf(decision("session")), "once");
     assert.equal(decisionOf(decision("once", false)), "reject");
+    // A command's Always is OpenCode's once: Chips remembers its starts (Chips ADR 0239).
+    assert.equal(decisionOf(decision("always"), true), "once");
+    assert.equal(decisionOf(decision("always", false), true), "reject");
   });
 
   it("shows an edit's diff, and a yes-or-no field as two choices, and leaves free text to OpenCode", () => {

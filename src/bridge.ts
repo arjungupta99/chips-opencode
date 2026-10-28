@@ -1019,7 +1019,12 @@ export class Bridge {
     pending.answered = true;
     if (decision.allowed && toolCall !== undefined) turn.allowed.set(toolCall, approvalId);
     await this.options.opencode
-      .replyPermission(askingSession, requestId, decisionOf(decision), decision.allowed ? undefined : decision.reason)
+      .replyPermission(
+        askingSession,
+        requestId,
+        decisionOf(decision, card.action.kind === "shell.exec"),
+        decision.allowed ? undefined : decision.reason,
+      )
       .catch((error: unknown) => this.log(`OpenCode didn't take the answer: ${messageOf(error)}`));
   }
 
@@ -1193,10 +1198,14 @@ interface Field {
   readonly default?: unknown;
 }
 
-/** OpenCode's decision for a person's answer: always where they said so, else once; a no is reject. */
-export function decisionOf(decision: Decision): PermissionDecision {
+/**
+ * OpenCode's decision for a person's answer: always where they said so, else once; a no is reject.
+ * A command's Always is OpenCode's once (Chips ADR 0239): Chips remembers how each part of it
+ * starts and answers the next ask itself, where OpenCode's own always would let through more.
+ */
+export function decisionOf(decision: Decision, command = false): PermissionDecision {
   if (!decision.allowed) return "reject";
-  return decision.scope === "always" ? "always" : "once";
+  return decision.scope === "always" && !command ? "always" : "once";
 }
 
 /** A form field as a Chips question, or nothing for one Chips can't ask: free text, numbers, a link. */
