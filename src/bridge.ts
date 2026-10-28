@@ -3,9 +3,11 @@
  * or one of the person's own) is a Chips agent (ADR 0087), registered by its own key. The first is
  * the harness's Main agent, in the harness's own room in the place of the default agent Chips gave
  * the harness there, and it answers for that default agent, and for any other of the harness's
- * Chips doesn't name here: a new agent a person asks for in a room (Chips ADR 0108) is one. A room
- * an agent is in is one OpenCode session of that agent, made the first time somebody there speaks
- * to it, and kept across restarts: it shows in OpenCode's own apps too.
+ * Chips doesn't name here: a new agent a person asks for in a room (Chips ADR 0108) is one, and so
+ * is the new agent a space a person asks for from Chips's + is claimed under, which answers its
+ * first words (Chips ADR 0241). A room an agent is in is one OpenCode session of that agent, made
+ * the first time somebody there speaks to it, and kept across restarts: it shows in OpenCode's own
+ * apps too.
  *
  * A message for an agent is a run:
  * - The words go to the session's inbox (`POST …/prompt`): the room note, what was said, and the
@@ -34,7 +36,7 @@
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { Agent, ApprovalInput, Chips, Decision, Project, Run, Speaker } from "@chipschat/harness";
+import type { Agent, ApprovalInput, Chips, Decision, Project, Run, SpaceAsked, Speaker } from "@chipschat/harness";
 import { heldNote, promptFor, pushedInWords, sendAnswer } from "@chipschat/harness";
 import {
   type AgentAsked,
@@ -84,10 +86,11 @@ export interface BridgeState {
 
 /**
  * What the harness asks Chips to let it do, when it joins with a code: have agents of its own
- * (Chips ADR 0087), make a new one a person asks for in a room (ADR 0108), and copy one for a
- * person's Fork. A link carries what the person chose instead.
+ * (Chips ADR 0087), take a space a person asks for from the + (ADR 0241), make a new one a person
+ * asks for in a room (ADR 0108), and copy one for a person's Fork. A link carries what the person
+ * chose instead.
  */
-export const WANTS = ["agents", "new_agents", "forks"] as const;
+export const WANTS = ["agents", "new_spaces", "new_agents", "forks"] as const;
 
 /**
  * What it asks for when it joins: `WANTS`, and `restarts` where the bridge runs OpenCode's server
@@ -312,6 +315,9 @@ export class Bridge {
     chips.on("agent.fork", (fork) => {
       this.copy(fork).catch((error: unknown) => this.log(`a copy went wrong: ${messageOf(error)}`));
     });
+    chips.onSpaceAsked((asked) => {
+      this.claim(asked).catch((error: unknown) => this.log(`a space from the + went wrong: ${messageOf(error)}`));
+    });
     chips.on("feedback", (feedback) => {
       this.notRight(feedback).catch((error: unknown) => this.log(`a second look went wrong: ${messageOf(error)}`));
     });
@@ -453,6 +459,45 @@ export class Bridge {
     });
     this.ours.add(agent.agentId);
     this.log(`${agent.name} made${agent.attached === false ? `, not in the room: ${agent.why ?? "too late"}` : ""}`);
+  }
+
+  /**
+   * A space a person asked for from Chips's + (Chips ADR 0241), or beside another harness: claimed
+   * under a key of its own, named from its first words, and Chips makes the new agent the key is
+   * for and puts it in the space. That agent answers the first words, which are the ask's and are
+   * not heard again as a message, as the first OpenCode agent, in a session and a folder of its
+   * own. A claim heard again finds the space claimed already, and the agent the same.
+   */
+  private async claim(asked: SpaceAsked): Promise<void> {
+    const { chips } = this.options;
+    const { spaceId, firstMessage } = asked;
+    const key = `opencode:space:${spaceId}`;
+    await chips.claimSpace(spaceId, key, titleFrom(firstMessage.text));
+    const agent = (await chips.agents.list()).find((each) => each.key === key);
+    if (agent === undefined) {
+      this.log(`claimed ${spaceId}, and Chips put no agent there`);
+      return;
+    }
+    this.ours.add(agent.agentId);
+    this.log(`${agent.name} claimed ${spaceId}`);
+    // Who said them, as the space's lines name them, with their standing (Chips SEC-49).
+    const context = await chips.roomContext(spaceId, { limit: 20 }).catch(() => undefined);
+    const said = context?.lines.find((line) => line.message_id === firstMessage.messageId)?.from;
+    const message = {
+      type: "message.new",
+      space_id: spaceId,
+      message_id: firstMessage.messageId,
+      text: firstMessage.text,
+      from: {
+        participant_id: asked.askedBy,
+        kind: "person",
+        display_name: said?.name ?? "Someone",
+        role: said?.role ?? "member",
+        ...(said?.workspace_role === undefined ? {} : { workspace_role: said.workspace_role }),
+      },
+      for: [agent.agentId],
+    } as unknown as MessageNew;
+    await this.hear(message);
   }
 
   /** A person's Fork, made once however often it is heard at a time. */
@@ -1381,6 +1426,14 @@ export function spoken(words: string): string {
 }
 
 const THOUGHT_ENDS = "</think>";
+
+/** A space's name from what it is for: its first line, cut at a word near 48 characters. */
+export function titleFrom(text: string): string {
+  const line = text.trim().split("\n")[0] ?? "";
+  if (line.length <= 48) return line;
+  const cut = line.slice(0, 48);
+  return `${cut.slice(0, Math.max(cut.lastIndexOf(" "), 24))}…`;
+}
 
 /** A copy's name, as Jacobian names its forks: `Nova · fork`, which Chips numbers when it is taken. */
 export function forkName(original: string): string {

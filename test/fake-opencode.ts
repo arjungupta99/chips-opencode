@@ -19,7 +19,8 @@
  * Words given while a session works wait in its inbox: `steer` ones are taken at its next step,
  * the rest when it is done. An interrupt parks what waited; words given after it start afresh.
  *
- * With `askFirst`, every session asks before it answers, as the golden scenario needs.
+ * With `askFirst`, the first session it made asks before it answers, as the golden scenario needs;
+ * a space the scenario asks for from the + answers at once.
  *
  * Restarted, its event streams are cut and nothing answers for a while; its sessions are kept, as
  * OpenCode keeps them on disk.
@@ -118,6 +119,8 @@ export async function startFakeOpenCode(
   const answers = new Map<string, (value: unknown) => void>();
   let count = 0;
   let deaf = false;
+  /** The first session it made, which asks first with `askFirst`. */
+  let first: string | undefined;
   const next = (prefix: string) => `${prefix}_${(count += 1)}`;
   const fake: Omit<FakeOpenCode, "url" | "close" | "forget" | "historyOf" | "restart"> = {
     password,
@@ -192,7 +195,7 @@ export async function startFakeOpenCode(
     if (/\brecall\b/.test(words)) {
       return step(session, async (message) => say(session, message, `First said here: ${session.history[0] ?? "nothing"}`));
     }
-    if (options.askFirst === true || /\bask\b/.test(words)) {
+    if ((options.askFirst === true && session.id === first) || /\bask\b/.test(words)) {
       let decision: unknown;
       await step(session, async (message) => {
         decision = await ask(session, message, "per_1", "npm test");
@@ -380,6 +383,7 @@ export async function startFakeOpenCode(
       if (method === "POST" && path === "/api/session") {
         const body = await bodyOf(request);
         const id = next("ses");
+        first ??= id;
         const own = (body["location"] as { directory?: unknown } | undefined)?.directory;
         sessions.set(id, {
           id,

@@ -8,6 +8,8 @@ server (`opencode serve`, 2.0).
   there speaks to it. It shows in OpenCode's own apps too.
 - A new agent a person asks for in a room (Add, then a new one) runs as the first OpenCode agent,
   in a session of its own.
+- A space a person asks for from Chips's + is claimed under a new agent, which answers its first
+  words the same way.
 - A copy of an agent a person asks for in another room (Fork) is a copy of its session in its own
   room, in the same folder: it remembers what the agent did there, and from then on the two
   remember apart.
@@ -32,6 +34,7 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | A question | a `form.created` whose fields are choices or yes-or-no, at most four → `POST …/form/{id}/reply` |
 | Stop | `POST …/interrupt`, and the words OpenCode hasn't taken yet taken back |
 | A steer, a follow-up, an interrupt | a prompt with `delivery: "steer"`; with `"queue"`; interrupt, then a prompt |
+| A space from Chips's + (Chips ADR 0241) | claimed under a new agent, named from the first line of its first words; the agent answers them as the first OpenCode agent, in a session and a folder of its own |
 | Fork (Chips ADR 0087): a copy of an agent in another room | `POST /api/session/{id}/fork` of the agent's session in its room, which copies what it remembers; then `PATCH /api/session/{id}` names the copy for its room and marks it as the copy's. The copy is registered after it (*Nova · fork* for Nova), `forkedFrom` the original, for the room asked, and works in the original's folder. An ask heard again registers the same copy; an agent that never spoke in its room is copied as a new one with nothing to remember |
 | Not right? on an agent's reply (Chips ADR 0200), or a 👎 from an older device | a run of the agent who said it, in its session for the room, after its turns there: a prompt with its reply, what wasn't right, and to answer again in its place; the goal is *Looking again:* and the note's first line. A 👍, or any other reaction, is nothing |
 | Trouble on the harness | `GET /api/info` every 30 s |
@@ -52,7 +55,7 @@ Not yet:
   one back yet.
 - OpenCode's models as the agent's Model group in Chips. Its commands, skills and context files.
 - Fork for a bridge that joined from the gallery: its card grants `agents` and `new_agents`. A
-  bridge that joins with a code asks for `forks` as well.
+  bridge that joins with a code asks for `new_spaces` and `forks` as well.
 - More than one OpenCode server per bridge.
 
 ## Restart

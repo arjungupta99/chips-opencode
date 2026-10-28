@@ -22,6 +22,7 @@ import {
   questionOf,
   secondLook,
   spoken,
+  titleFrom,
   WANTS,
   wantsFor,
 } from "../src/bridge.ts";
@@ -277,6 +278,40 @@ describe("a new agent a person asks for (Chips ADR 0108)", () => {
       [...made].sort(),
     );
     assert.deepEqual(Object.keys(state.sessions).sort(), made.map((id) => `${id}|${room}`).sort());
+  });
+});
+
+// The + offered OpenCode, and nothing took the space (Chips ADR 0241).
+describe("a space from the + (Chips ADR 0241)", () => {
+  it("is claimed and named, and a new agent answers the first words in a session and a folder of its own", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chips-opencode-plus-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    const chips = await startFakeChips({ capabilities: ["agents", "new_spaces", "new_agents"] });
+    open.push(() => chips.close());
+    const { client, agentId, opencode, state } = await rig({ chips, folders: root });
+    const { spaceId } = await chips.askForSpace("Plan a weekend in Lisbon for two");
+    const claimed = await sent(chips, "space.claimed", (event) => event.space_id === spaceId);
+    assert.equal(claimed.payload["title"], "Plan a weekend in Lisbon for two");
+    const started = await sent(chips, "run.started", (event) => event.space_id === spaceId);
+    const milo = (await client.agents.list()).find((agent) => agent.key === `opencode:space:${spaceId}`);
+    assert.ok(milo !== undefined && milo.agentId !== agentId, "a new agent, by the name the space held");
+    assert.deepEqual([milo.name, milo.spaces], ["Milo", [spaceId]]);
+    assert.equal(started.actor.id, milo.agentId);
+    assert.equal(started.payload["goal"], "Plan a weekend in Lisbon for two");
+    assert.equal((await reply(chips, started.run_id)).payload["text"], "Here is the answer.");
+    assert.deepEqual(opencode.created.map((each) => [each.agent, each.location]), [["build", { directory: join(root, "milo") }]]);
+    assert.equal(state.sessions[`${milo.agentId}|${spaceId}`], opencode.created[0]?.id);
+    // The first words are the ask's, said once, with who said them and their standing.
+    assert.equal(opencode.prompts.length, 1);
+    assert.match(opencode.prompts[0]?.text ?? "", /\n\nArjun \(owner\): Plan a weekend in Lisbon for two$/);
+  });
+
+  it("names a space from the first line of what it is for", () => {
+    assert.equal(titleFrom("Short one\nand more"), "Short one");
+    assert.equal(
+      titleFrom("Work out why the nightly backup to the NAS keeps failing after midnight"),
+      "Work out why the nightly backup to the NAS…",
+    );
   });
 });
 
