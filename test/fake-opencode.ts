@@ -130,7 +130,18 @@ export interface FakeOpenCode {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function startFakeOpenCode(
-  options: { askFirst?: boolean; directory?: string; cold?: boolean; port?: number; password?: string; pid?: number } = {},
+  options: {
+    askFirst?: boolean;
+    directory?: string;
+    cold?: boolean;
+    port?: number;
+    password?: string;
+    pid?: number;
+    /** What `GET /api/info` says it is: 2.0.29 unless set. */
+    version?: string;
+    /** What its config's `instructions` names, for every folder. */
+    instructions?: string[];
+  } = {},
 ): Promise<FakeOpenCode> {
   /** With `cold`, its first catalogue answers are empty, as OpenCode 2.0's are for a project it hasn't loaded. */
   let cold = options.cold === true ? 2 : 0;
@@ -378,7 +389,18 @@ export async function startFakeOpenCode(
       const path = url.pathname;
       if (!fake.up) return json(response, 503, { _tag: "Unavailable", message: "down" });
       if (request.headers.authorization !== auth) return json(response, 401, { _tag: "UnauthorizedError", message: "Authentication required" });
-      if (method === "GET" && path === "/api/info") return json(response, 200, { version: "2.0.29", pid: options.pid ?? 1, urls: [], paths: { tmp: "/tmp" } });
+      if (method === "GET" && path === "/api/info") {
+        return json(response, 200, { version: options.version ?? "2.0.29", pid: options.pid ?? 1, urls: [], paths: { tmp: "/tmp" } });
+      }
+      // A folder is a project of its own, outside any repository.
+      const asked = url.searchParams.get("location[directory]") ?? directory;
+      if (method === "GET" && path === "/api/location") return json(response, 200, { directory: asked, project: { id: "prj_1", directory: asked } });
+      if (method === "GET" && path === "/api/config") {
+        return json(response, 200, [
+          ...(options.instructions === undefined ? [] : [{ type: "document", path: "/config/opencode.json", info: { instructions: options.instructions } }]),
+          { type: "directory", path: "/config" },
+        ]);
+      }
       if (method === "GET" && path === "/api/agent") {
         if (cold > 0) {
           cold -= 1;

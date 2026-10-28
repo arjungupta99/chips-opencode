@@ -1,10 +1,13 @@
 /**
  * The golden scenario of Chips's conformance kit, played against the bridge and a scripted OpenCode
- * that asks before it acts: what `chips conformance custom --capabilities agents,new_spaces,new_agents,restarts,models`
+ * that asks before it acts: what `chips conformance custom --capabilities agents,new_spaces,new_agents,restarts,models,context_files`
  * checks of it live, running OpenCode's server itself, which a person's Restart restarts.
  */
 
 import { strict as assert } from "node:assert";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { it } from "node:test";
 import { formatReport, runConformance } from "@chipschat/conformance";
 import { type Chips, connect } from "@chipschat/harness";
@@ -14,6 +17,8 @@ import { startFakeOpenCode } from "./fake-opencode.ts";
 
 it("passes the golden scenario", async () => {
   const opencode = await startFakeOpenCode({ askFirst: true });
+  // A home of its own, so nobody's own OpenCode files are read.
+  const home = mkdtempSync(join(tmpdir(), "chips-opencode-home-"));
   let client: Chips | undefined;
   let bridge: Bridge | undefined;
   try {
@@ -21,7 +26,7 @@ it("passes the golden scenario", async () => {
       beatTimeoutMs: 3000,
       subject: {
         name: "chips-opencode",
-        capabilities: ["agents", "new_spaces", "new_agents", "restarts", "models"],
+        capabilities: ["agents", "new_spaces", "new_agents", "restarts", "models", "context_files"],
         start: async (address) => {
           client = await connect({
             url: address.url,
@@ -37,6 +42,8 @@ it("passes the golden scenario", async () => {
             state: { sessions: {} },
             saveState: () => undefined,
             restartServer: () => opencode.restart(200),
+            folders: join(home, "chips-opencode", "agents"),
+            places: { home, config: join(home, ".config", "opencode") },
           });
           await bridge.start();
         },
@@ -58,12 +65,13 @@ it("passes the golden scenario", async () => {
         ["Talks", 1],
         ["Supervised", 1],
         ["Lives in Chips", 4],
-        ["Managed from Chips", 1],
+        ["Managed from Chips", 2],
       ],
     );
     const managed = Object.fromEntries((report.levels[3]?.capabilities ?? []).map((each) => [each.capability, each.outcome]));
-    assert.deepEqual(managed, { models: "passed" });
+    assert.deepEqual(managed, { models: "passed", context_files: "passed" });
   } finally {
     await opencode.close();
+    rmSync(home, { recursive: true, force: true });
   }
 });

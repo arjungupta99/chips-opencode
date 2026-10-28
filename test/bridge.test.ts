@@ -47,6 +47,7 @@ afterEach(async () => {
 });
 
 const AGENT = { name: "OpenCode", agent: "build" } as const;
+const NO_HOME = join(tmpdir(), "chips-opencode-no-home");
 
 async function rig(
   options: {
@@ -84,6 +85,8 @@ async function rig(
     healthEveryMs: 50,
     reconnectMs: 50,
     log: (line) => lines.push(line),
+    // Nobody's own OpenCode files are read: a home of its own, with nothing in it.
+    places: { home: NO_HOME, config: join(NO_HOME, ".config", "opencode") },
     ...(options.folders === undefined ? {} : { folders: options.folders }),
     ...(options.projects === undefined ? {} : { projects: options.projects }),
     ...(options.restartServer === undefined ? {} : { restartServer: () => options.restartServer?.(opencode) ?? Promise.resolve() }),

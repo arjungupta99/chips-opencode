@@ -35,17 +35,21 @@
  *
  * Each agent's page in Chips shows its model (Chips ADR 0241, `models.ts`): one of the models
  * OpenCode's server runs, at one of its levels, picked there and kept here, and given to each
- * session of the agent's before its next message.
+ * session of the agent's before its next message. It shows the files OpenCode builds the agent
+ * from too (`context.ts`), which a person may change there.
  */
 
 import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
   Agent,
+  AgentContextCopy,
   AgentModelCopy,
   ApprovalInput,
   Chips,
   Decision,
+  HarnessContextCopy,
   Project,
   Run,
   SettingsHandlers,
@@ -56,6 +60,7 @@ import { heldNote, promptFor, pushedInWords, Refuse, sendAnswer } from "@chipsch
 import {
   type AgentAsked,
   type AgentFork,
+  type ContextEditFrame,
   createIdGenerator,
   FORK_WAIT_MS,
   type Feedback,
@@ -64,6 +69,7 @@ import {
   type ProjectFacts,
   type StepKind,
 } from "@chipschat/protocol";
+import { before, ContextFiles, namedFiles, type Places, placesOf, READS_NAMED, type Reading, within } from "./context.js";
 import { type Fallback, type ModelPick, modelCopy, pickOf, refOf, sameModel, writtenOf } from "./models.js";
 import {
   type FormAnswer,
@@ -106,10 +112,10 @@ export interface BridgeState {
 /**
  * What the harness asks Chips to let it do, when it joins with a code: have agents of its own
  * (Chips ADR 0087), take a space a person asks for from the + (ADR 0241), make a new one a person
- * asks for in a room (ADR 0108), copy one for a person's Fork, and show each one's model (ADR
- * 0241). A link carries what the person chose instead.
+ * asks for in a room (ADR 0108), copy one for a person's Fork, and show each one's model and files
+ * (ADR 0241). A link carries what the person chose instead.
  */
-export const WANTS = ["agents", "new_spaces", "new_agents", "forks", "models"] as const;
+export const WANTS = ["agents", "new_spaces", "new_agents", "forks", "models", "context_files"] as const;
 
 /**
  * What it asks for when it joins: `WANTS`, and `restarts` where the bridge runs OpenCode's server
@@ -133,6 +139,13 @@ export interface BridgeOptions {
    * it every session works in the project: the config's `directory`, else the server's own.
    */
   readonly folders?: string | undefined;
+  /**
+   * The one project every session works in, where the config names one instead of `folders`: the
+   * files OpenCode reads there are each agent's.
+   */
+  readonly directory?: string | undefined;
+  /** Where OpenCode's home and its own folder are, for the files it reads beside an agent's: this machine's. */
+  readonly places?: Places | undefined;
   /**
    * Whether each agent works on its room's project in a copy in its own folder (Chips ADR 0221):
    * true when this machine has a git new enough. Only with `folders`: sessions that work in the
@@ -310,8 +323,19 @@ export class Bridge {
   /** Why OpenCode's server isn't there, where the bridge knows more than that it doesn't answer. */
   private why: string | undefined;
 
+  /** The files OpenCode builds each agent from, where the bridge knows each agent's folder. */
+  private readonly files: ContextFiles | undefined;
+  private readonly places: Places;
+  /** Each folder's project root, as OpenCode said it. */
+  private readonly roots = new Map<string, string>();
+  /** Whether the server reads the files its config's `instructions` names, asked once a start or a restart. */
+  private readsNamed: Promise<boolean> | undefined;
+
   constructor(private readonly options: BridgeOptions) {
     this.log = options.log ?? (() => undefined);
+    this.places = options.places ?? placesOf(process.env, homedir());
+    const known = options.folders !== undefined || options.directory !== undefined;
+    this.files = known ? new ContextFiles(this.places, options.folders) : undefined;
   }
 
   /** Register the agents, start hearing OpenCode and what is said in Chips, and say how it is. */
@@ -340,10 +364,11 @@ export class Bridge {
     chips.on("feedback", (feedback) => {
       this.notRight(feedback).catch((error: unknown) => this.log(`a second look went wrong: ${messageOf(error)}`));
     });
-    // Each agent's model as OpenCode has it now (Chips ADR 0241).
+    // Each agent's model and files as OpenCode has them now (Chips ADR 0241).
     for (const agent of await chips.agents.list().catch(() => [])) {
       if (agent.state !== "archived") await this.sendModel(agent.agentId);
     }
+    await this.sendContexts();
     await this.sayHowItIs();
     this.health = setInterval(() => void this.sayHowItIs(), this.options.healthEveryMs ?? 30_000);
     this.health.unref();
@@ -378,6 +403,8 @@ export class Bridge {
     try {
       await again();
       this.why = undefined;
+      // The same OpenCode, or one upgraded meanwhile: what it reads is asked again.
+      this.readsNamed = undefined;
       // The event stream opened again now; what was missed meanwhile is read once it is.
       this.wake?.();
     } catch (error) {
@@ -483,6 +510,7 @@ export class Bridge {
     this.ours.add(agent.agentId);
     this.log(`${agent.name} made${agent.attached === false ? `, not in the room: ${agent.why ?? "too late"}` : ""}`);
     await this.sendModel(agent.agentId);
+    await this.sendContexts();
   }
 
   /**
@@ -505,6 +533,7 @@ export class Bridge {
     this.ours.add(agent.agentId);
     this.log(`${agent.name} claimed ${spaceId}`);
     await this.sendModel(agent.agentId);
+    await this.sendContexts();
     // Who said them, as the space's lines name them, with their standing (Chips SEC-49).
     const context = await chips.roomContext(spaceId, { limit: 20 }).catch(() => undefined);
     const said = context?.lines.find((line) => line.message_id === firstMessage.messageId)?.from;
@@ -606,7 +635,7 @@ export class Bridge {
         // Not in the room, and no why: it is there already, from the ask heard before.
         `${copy.attached === false && copy.why !== undefined ? `; not in the room: ${copy.why}` : ""}`,
     );
-    void this.sendModel(copy.agentId);
+    void this.sendModel(copy.agentId).then(() => this.sendContexts());
   }
 
   /** The session of an agent's to copy: its room's, or where it is in none, the last it had. */
@@ -707,6 +736,102 @@ export class Bridge {
         this.log(`${sessionId} stays on its model: ${messageOf(error)}`);
       }
     }
+  }
+
+  /** The folder an agent's sessions work in, its own or the one project's; none where the bridge knows neither. */
+  private async agentFolder(whose: Pick<Room, "who" | "agent">): Promise<string | undefined> {
+    return (await this.folderFor(whose)) ?? this.options.directory;
+  }
+
+  /**
+   * What OpenCode reads for a folder beside its `AGENTS.md` files: where its walk up stops, and
+   * from 2.0.30 the files its config's `instructions` names. A folder whose project OpenCode can't
+   * say is its own project.
+   */
+  private async readingOf(folder: string): Promise<Reading> {
+    const { opencode } = this.options;
+    const { home } = this.places;
+    let root = this.roots.get(folder);
+    if (root === undefined) {
+      root = await opencode.projectRoot(folder).catch(() => folder);
+      this.roots.set(folder, root);
+    }
+    this.readsNamed ??= opencode.version().then(
+      (version) => !before(version, READS_NAMED),
+      () => false,
+    );
+    const sources = (await this.readsNamed) ? await opencode.instructions(folder).catch(() => []) : [];
+    return { stop: within(folder, home) ? home : root, named: namedFiles(sources, folder, root, home) };
+  }
+
+  /** Each agent of the harness's, with the folder its sessions work in and what OpenCode reads there. */
+  private async agentReadings(): Promise<{ agentId: string; folder: string; reading: Reading }[]> {
+    const read: { agentId: string; folder: string; reading: Reading }[] = [];
+    for (const agent of await this.options.chips.agents.list().catch(() => [])) {
+      if (agent.state === "archived") continue;
+      const whose = await this.whoseIs(agent.agentId);
+      const folder = whose === undefined ? undefined : await this.agentFolder(whose);
+      if (folder !== undefined) read.push({ agentId: agent.agentId, folder, reading: await this.readingOf(folder) });
+    }
+    return read;
+  }
+
+  /** The harness's own set and each agent's files, as they are on disk now: each sent where it changed. */
+  private async sendContexts(): Promise<void> {
+    const files = this.files;
+    if (files === undefined) return;
+    try {
+      const read = await this.agentReadings();
+      const readings = new Map(read.map((each) => [each.folder, each.reading]));
+      await this.options.chips.settings.harnessContext(files.harnessCopy(readings, read.map((each) => each.folder)));
+      for (const { agentId, folder, reading } of read) {
+        await this.options.chips.settings.context(agentId, files.agentCopy(folder, reading));
+      }
+    } catch (error) {
+      this.log(`the agents' files not sent: ${messageOf(error)}`);
+    }
+  }
+
+  /** One agent's files sent, where they changed. */
+  private async sendContext(agentId: string): Promise<void> {
+    const whose = await this.whoseIs(agentId);
+    const folder = whose === undefined ? undefined : await this.agentFolder(whose);
+    if (this.files === undefined || folder === undefined) return;
+    try {
+      await this.options.chips.settings.context(agentId, this.files.agentCopy(folder, await this.readingOf(folder)));
+    } catch (error) {
+      this.log(`the files of ${agentId} not sent: ${messageOf(error)}`);
+    }
+  }
+
+  /**
+   * A person's edit of a file from Chips (Chips ADR 0134): saved where OpenCode reads it, only if
+   * it is still the version they changed, and answered with the copy as it is now. OpenCode reads
+   * it again before the agent's next model call, and tells the agent what changed: every agent
+   * working in that folder, or for the harness's own set every agent that reads the file.
+   */
+  async contextEdited(edit: ContextEditFrame): Promise<AgentContextCopy | HarnessContextCopy> {
+    const files = this.files;
+    if (files === undefined) throw new Refuse("This bridge doesn't know where its agents' files are.");
+    if (edit.agent_id === undefined) {
+      const read = await this.agentReadings();
+      const readings = new Map(read.map((each) => [each.folder, each.reading]));
+      const folders = read.map((each) => each.folder);
+      await files.saveShared(readings, folders, edit);
+      this.log(`OpenCode's ${edit.name} saved from Chips`);
+      return files.harnessCopy(readings, folders);
+    }
+    const whose = await this.whoseIs(edit.agent_id);
+    const folder = whose === undefined ? undefined : await this.agentFolder(whose);
+    if (whose === undefined || folder === undefined) throw new Refuse("This harness has no such agent.");
+    const reading = await this.readingOf(folder);
+    await files.saveAgent(folder, reading, edit);
+    this.log(`${await this.nameOf(whose)}'s ${edit.name} saved from Chips`);
+    // A copy of the agent works in its folder too, and reads the same file.
+    for (const other of await this.agentReadings()) {
+      if (other.agentId !== edit.agent_id && other.folder === folder) void this.sendContext(other.agentId);
+    }
+    return files.agentCopy(folder, reading);
   }
 
   // ------------------------------------------------------------------ what is said to it
@@ -858,8 +983,10 @@ export class Bridge {
     if (this.turns.get(sessionId) === turn) this.turns.delete(sessionId);
     if (last.outcome === "succeeded") await this.finish(turn);
     else await this.ended(turn, last);
-    // What OpenCode offers may have changed meanwhile: a provider set up, a model added.
+    // What OpenCode offers may have changed meanwhile, a provider set up, and the agent may have
+    // changed its own files.
     await this.sendModel(speakerId ?? agent.agentId);
+    await this.sendContext(speakerId ?? agent.agentId);
   }
 
   /** The words into the room's session: the one it had, or a new one when OpenCode no longer has it. */
@@ -1426,7 +1553,7 @@ export class Bridge {
 
 /**
  * What a person changes of the harness's agents from their pages, made by the bridge once it is
- * running: each agent's model (Chips ADR 0241).
+ * running: each agent's model and files (Chips ADR 0241).
  */
 export function settingsFor(bridge: () => Bridge | undefined): SettingsHandlers {
   const active = (): Bridge => {
@@ -1436,6 +1563,7 @@ export function settingsFor(bridge: () => Bridge | undefined): SettingsHandlers 
   };
   return {
     models: (change) => active().modelChanged(change),
+    context: (edit) => active().contextEdited(edit),
   };
 }
 

@@ -107,6 +107,34 @@ export class OpenCodeClient {
     }
   }
 
+  /** Which OpenCode answers: `GET /api/info`'s `version`, `2.0.25`. */
+  async version(): Promise<string> {
+    const info = await this.call("GET", "/api/info");
+    return typeof info["version"] === "string" ? info["version"] : "";
+  }
+
+  /** The root of the project a folder is in, as OpenCode has it: the folder itself, outside any repository. */
+  async projectRoot(directory: string): Promise<string> {
+    const read = await this.call("GET", `/api/location${whereIs(directory)}`);
+    const project = (read["project"] ?? {}) as Record<string, unknown>;
+    return typeof project["directory"] === "string" ? project["directory"] : directory;
+  }
+
+  /**
+   * The instruction files the config documents for a folder name (`instructions`), each document's
+   * in turn, each named once: a path, a glob or a URL, as written.
+   */
+  async instructions(directory: string): Promise<string[]> {
+    const answer = await this.fetcher(`${this.root}/api/config${whereIs(directory)}`, { headers: { authorization: this.auth } });
+    if (!answer.ok) throw await failureOf(answer);
+    const entries = (await answer.json()) as unknown;
+    const named = (Array.isArray(entries) ? (entries as Record<string, unknown>[]) : [])
+      .filter((entry) => entry["type"] === "document")
+      .flatMap((entry) => ((entry["info"] ?? {}) as Record<string, unknown>)["instructions"])
+      .filter((each): each is string => typeof each === "string");
+    return [...new Set(named)];
+  }
+
   async agents(): Promise<AgentInfo[]> {
     return (await this.catalogue("agent")) as AgentInfo[];
   }
@@ -292,7 +320,7 @@ export class OpenCodeClient {
   /** `?location[directory]=…` for the catalogues, which are per project. */
   private where(): string {
     const directory = this.address.directory;
-    return directory === undefined ? "" : `?location%5Bdirectory%5D=${encodeURIComponent(directory)}`;
+    return directory === undefined ? "" : whereIs(directory);
   }
 
   private async call(method: string, path: string, body?: Readonly<Record<string, unknown>>): Promise<Record<string, unknown>> {
@@ -308,6 +336,11 @@ export class OpenCodeClient {
     const text = await answer.text();
     return text === "" ? {} : (JSON.parse(text) as Record<string, unknown>);
   }
+}
+
+/** `?location[directory]=…`: what OpenCode says of a folder. */
+function whereIs(directory: string): string {
+  return `?location%5Bdirectory%5D=${encodeURIComponent(directory)}`;
 }
 
 /** One server-sent event's `data`, read as OpenCode's JSON, or nothing for a heartbeat. */

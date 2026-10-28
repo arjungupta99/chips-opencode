@@ -1,20 +1,25 @@
 /**
  * What a person sees and changes of the harness's agents from their pages (Chips ADR 0241): their
- * models. Against Chips's conformance fake, which checks every copy against the protocol's schemas,
- * and the scripted OpenCode.
+ * models and their files. Against Chips's conformance fake, which checks every copy against the
+ * protocol's schemas, and the scripted OpenCode, with a home of the test's own, so nobody's own
+ * OpenCode files are read.
  */
 
 import { strict as assert } from "node:assert";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
 import { type Chips, connect } from "@chipschat/harness";
 import { createIdGenerator } from "@chipschat/protocol";
 import { type AgentConfig, Bridge, type BridgeState, settingsFor } from "../src/bridge.ts";
+import { before, hashOf, namedFiles, upTo } from "../src/context.ts";
 import { modelCopy, pickOf } from "../src/models.ts";
 import { OpenCodeClient } from "../src/opencode.ts";
 import { CATALOGUE, type FakeOpenCode, startFakeOpenCode } from "./fake-opencode.ts";
 
-const CAPABILITIES = ["agents", "new_spaces", "new_agents", "forks", "models"];
+const CAPABILITIES = ["agents", "new_spaces", "new_agents", "forks", "models", "context_files"];
 
 type Body = Record<string, unknown>;
 
@@ -27,6 +32,9 @@ interface Rig {
   /** The harness's Main agent. */
   readonly agentId: string;
   readonly lines: string[];
+  /** The test's own home, and the folder the agents' folders are made in. */
+  readonly home: string;
+  readonly folders: string;
 }
 
 const open: (() => Promise<void>)[] = [];
@@ -34,7 +42,11 @@ afterEach(async () => {
   for (const close of open.splice(0).reverse()) await close();
 });
 
-async function rig(options: { agent?: AgentConfig; state?: BridgeState; chips?: FakeChips; opencode?: FakeOpenCode } = {}): Promise<Rig> {
+async function rig(
+  options: { agent?: AgentConfig; state?: BridgeState; chips?: FakeChips; opencode?: FakeOpenCode; home?: string } = {},
+): Promise<Rig> {
+  const home = options.home ?? homeOfItsOwn();
+  const folders = join(home, "chips-opencode", "agents");
   const chips = options.chips ?? (await startFakeChips({ capabilities: CAPABILITIES }));
   if (options.chips === undefined) open.push(() => chips.close());
   const opencode = options.opencode ?? (await startFakeOpenCode());
@@ -53,6 +65,8 @@ async function rig(options: { agent?: AgentConfig; state?: BridgeState; chips?: 
     healthEveryMs: 50,
     reconnectMs: 50,
     log: (line) => lines.push(line),
+    folders,
+    places: { home, config: join(home, ".config", "opencode") },
   });
   made = bridge;
   open.push(async () => {
@@ -60,8 +74,19 @@ async function rig(options: { agent?: AgentConfig; state?: BridgeState; chips?: 
     client.close();
   });
   await bridge.start();
-  return { chips, client, bridge, opencode, state, agentId: bridge.mainAgentId ?? "", lines };
+  return { chips, client, bridge, opencode, state, agentId: bridge.mainAgentId ?? "", lines, home, folders };
 }
+
+function homeOfItsOwn(): string {
+  const home = mkdtempSync(join(tmpdir(), "chips-opencode-home-"));
+  open.push(async () => rmSync(home, { recursive: true, force: true }));
+  return home;
+}
+
+const write = (path: string, text: string) => {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, text);
+};
 
 async function until<T>(done: () => T | undefined | false, timeoutMs = 3000): Promise<T> {
   const by = Date.now() + timeoutMs;
@@ -84,9 +109,10 @@ const ids = createIdGenerator();
 
 /** A frame as Chips sends it down the harness's socket, heard by the SDK as it hears one, and answered. */
 async function hear(rig: Rig, frame: Body): Promise<string> {
-  const changeId = ids.next("change");
+  const edit = frame["frame"] === "context.edit";
+  const changeId = ids.next(edit ? "edit" : "change");
   await rig.client.settings.hear({
-    change_id: changeId,
+    [edit ? "edit_id" : "change_id"]: changeId,
     harness_id: rig.chips.address.harnessId,
     asked_by: rig.chips.workspace.owner.participantId,
     asked_at: new Date().toISOString(),
@@ -96,6 +122,8 @@ async function hear(rig: Rig, frame: Body): Promise<string> {
 }
 
 const modelOf = (rig: Rig, agentId = rig.agentId) => rig.chips.settings.copy("model", agentId) as Body | undefined;
+const filesOf = (rig: Rig, agentId = rig.agentId) => rig.chips.settings.copy("context", agentId) as { files: Body[] } | undefined;
+const sharedOf = (rig: Rig) => rig.chips.settings.copy("harness-context", rig.chips.address.harnessId) as { shared: Body[] } | undefined;
 const answerTo = (rig: Rig, changeId: string) => rig.chips.settings.answerTo(changeId);
 
 describe("an agent's model (Chips ADR 0241)", () => {
@@ -221,5 +249,143 @@ describe("an agent's model (Chips ADR 0241)", () => {
     assert.deepEqual([copy?.model, copy?.effort, copy?.own], ["gone/old-1", "high", true]);
     assert.deepEqual(pickOf({ model: null, effort: null }, CATALOGUE), null);
     assert.deepEqual(pickOf({ model: "nous/heron-2", effort: "xhigh" }, CATALOGUE), { model: "nous/heron-2", effort: "xhigh" });
+  });
+});
+
+describe("an agent's files (Chips ADRs 0134, 0241)", () => {
+  it("lists the AGENTS.md files OpenCode reads for it: its own, every agent's, one above, and yours read only", async () => {
+    const home = homeOfItsOwn();
+    write(join(home, ".config", "opencode", "AGENTS.md"), "Answer briefly.\n");
+    write(join(home, "chips-opencode", "AGENTS.md"), "Work in British English.\n");
+    const main = await rig({ home });
+    const files = await until(() => filesOf(main));
+    assert.deepEqual(files, {
+      files: [
+        { name: "AGENTS.md", title: "How it works", role: "instructions", text: "", hash: hashOf(""), editable: true },
+        {
+          name: "~ › chips-opencode › agents › AGENTS.md",
+          title: "For every OpenCode agent",
+          role: "instructions",
+          about: "~/chips-opencode/agents/AGENTS.md",
+          shared: "every-agent",
+          replaceable: false,
+          editable: false,
+        },
+        {
+          name: "~ › chips-opencode › AGENTS.md",
+          title: "From ~/chips-opencode",
+          role: "instructions",
+          about: "~/chips-opencode/AGENTS.md",
+          shared: files.files[2]?.["shared"],
+          replaceable: false,
+          editable: false,
+        },
+        {
+          name: "~ › .config › opencode › AGENTS.md",
+          title: "For all your OpenCode",
+          role: "instructions",
+          about: "~/.config/opencode/AGENTS.md",
+          shared: "yours",
+          replaceable: false,
+          editable: false,
+        },
+      ],
+    });
+    const shared = await until(() => sharedOf(main));
+    assert.deepEqual(
+      shared.shared.map((file) => [file["id"], file["text"], file["editable"], file["why_read_only"], file["used_by"]]),
+      [
+        ["every-agent", "", true, undefined, 1],
+        [files.files[2]?.["shared"], "Work in British English.\n", false, "It sits above the agents' folders.", 1],
+        ["yours", "Answer briefly.\n", false, "Your own OpenCode reads it too.", 1],
+      ],
+    );
+  });
+
+  it("saves a person's edit where OpenCode reads it, only if the file is still the one they changed", async () => {
+    const main = await rig();
+    await until(() => filesOf(main));
+    const own = join(main.folders, "opencode", "AGENTS.md");
+    const saved = await hear(main, { frame: "context.edit", agent_id: main.agentId, name: "AGENTS.md", text: "Be kind.\n", base_hash: hashOf("") });
+    assert.equal(answerTo(main, saved)?.made, true);
+    assert.equal(readFileSync(own, "utf8"), "Be kind.\n");
+    assert.equal(filesOf(main)?.files[0]?.["text"], "Be kind.\n");
+    // Changed meanwhile, in OpenCode or by the agent: refused, and the file left as it is.
+    write(own, "Be very kind.\n");
+    const stale = await hear(main, { frame: "context.edit", agent_id: main.agentId, name: "AGENTS.md", text: "Be curt.\n", base_hash: hashOf("Be kind.\n") });
+    assert.equal(answerTo(main, stale)?.made, false);
+    assert.equal(readFileSync(own, "utf8"), "Be very kind.\n");
+    // Every agent's file, from the harness's page; yours is not the bridge's to change.
+    const every = await hear(main, { frame: "context.edit", name: "~ › chips-opencode › agents › AGENTS.md", text: "Say who you are.\n", base_hash: hashOf("") });
+    assert.equal(answerTo(main, every)?.made, true);
+    assert.equal(readFileSync(join(main.folders, "AGENTS.md"), "utf8"), "Say who you are.\n");
+    write(join(main.home, ".config", "opencode", "AGENTS.md"), "Mine.\n");
+    const yours = await hear(main, { frame: "context.edit", name: "~ › .config › opencode › AGENTS.md", text: "Not mine.\n", base_hash: hashOf("Mine.\n") });
+    assert.deepEqual([answerTo(main, yours)?.made, answerTo(main, yours)?.message], [false, "Your own OpenCode reads it too."]);
+    const theirs = await hear(main, { frame: "context.edit", agent_id: main.agentId, name: "~ › chips-opencode › agents › AGENTS.md", text: "x", base_hash: hashOf("Say who you are.\n") });
+    assert.equal(answerTo(main, theirs)?.message, "Every agent reads this one. Change it on OpenCode's page.");
+  });
+
+  it("gives a new agent a folder and a file of its own, and counts it among those reading every agent's", async () => {
+    const main = await rig();
+    const room = await main.chips.openRoom("Trip");
+    const { askId } = await main.chips.askForAgent(room, "Nova");
+    await main.chips.waitFor((event) => (event.type === "membership.added" && event.payload["made_for"] === askId ? event : undefined), 3000);
+    const nova = (await main.client.agents.list()).find((agent) => agent.name === "Nova")?.agentId ?? "";
+    await until(() => filesOf(main, nova));
+    await hear(main, { frame: "context.edit", agent_id: nova, name: "AGENTS.md", text: "You are Nova.\n", base_hash: hashOf("") });
+    assert.equal(readFileSync(join(main.folders, "nova", "AGENTS.md"), "utf8"), "You are Nova.\n");
+    assert.equal(filesOf(main)?.files[0]?.["text"], "", "Main's own is its own");
+    await until(() => sharedOf(main)?.shared[0]?.["used_by"] === 2);
+  });
+
+  it("from OpenCode 2.0.30, lists the files its config's instructions names: the agent's own, and the rest read only", async () => {
+    const home = homeOfItsOwn();
+    const folder = join(home, "chips-opencode", "agents", "opencode");
+    write(join(folder, "RULES.md"), "Use tabs.\n");
+    write(join(home, "notes", "STYLE.md"), "Short lines.\n");
+    const instructions = ["RULES.md", "~/notes/STYLE.md", "https://example.com/rules.md"];
+    const opencode = await startFakeOpenCode({ version: "2.0.30", instructions });
+    open.push(() => opencode.close());
+    const main = await rig({ home, opencode });
+    const files = await until(() => filesOf(main));
+    assert.deepEqual(
+      files.files.map((file) => [file["name"], file["title"], file["editable"], file["text"]]),
+      [
+        ["AGENTS.md", "How it works", true, ""],
+        ["RULES.md", "Named in OpenCode's config", true, "Use tabs.\n"],
+        ["~ › chips-opencode › agents › AGENTS.md", "For every OpenCode agent", false, undefined],
+        ["~ › notes › STYLE.md", "Named in OpenCode's config", false, undefined],
+      ],
+    );
+    const named = (await until(() => sharedOf(main))).shared.find((file) => file["name"] === "~ › notes › STYLE.md");
+    assert.deepEqual([named?.["text"], named?.["why_read_only"]], ["Short lines.\n", "OpenCode's config names it for every session."]);
+    const ruled = await hear(main, { frame: "context.edit", agent_id: main.agentId, name: "RULES.md", text: "Use spaces.\n", base_hash: hashOf("Use tabs.\n") });
+    assert.equal(answerTo(main, ruled)?.made, true);
+    assert.equal(readFileSync(join(folder, "RULES.md"), "utf8"), "Use spaces.\n");
+    // OpenCode 2.0.25 doesn't read them: none is shown.
+    const older = await startFakeOpenCode({ version: "2.0.25", instructions });
+    open.push(() => older.close());
+    const before25 = await rig({ home: homeOfItsOwn(), opencode: older });
+    assert.deepEqual((await until(() => filesOf(before25))).files.map((file) => file["name"]), ["AGENTS.md", "~ › chips-opencode › agents › AGENTS.md"]);
+  });
+
+  it("finds the files OpenCode would: up to the home folder, the config's in turn, and versions in order", () => {
+    const home = homeOfItsOwn();
+    const folder = join(home, "a", "b");
+    write(join(folder, "docs", "one.md"), "1");
+    write(join(folder, "docs", "two.md"), "2");
+    write(join(home, "x.md"), "x");
+    assert.deepEqual(upTo(folder, home), [folder, join(home, "a"), home]);
+    assert.deepEqual(upTo("/elsewhere/c", home), ["/elsewhere/c"]);
+    assert.deepEqual(namedFiles(["docs/*.md", `${home}/x.md`, "docs/one.md", "http://example.com/a.md"], folder, folder, home), [
+      join(folder, "docs", "one.md"),
+      join(folder, "docs", "two.md"),
+      join(home, "x.md"),
+    ]);
+    assert.equal(existsSync(join(folder, "AGENTS.md")), false);
+    assert.equal(before("2.0.25", "2.0.30"), true);
+    assert.equal(before("2.1.0", "2.0.30"), false);
+    assert.equal(before("2.0.30", "2.0.30"), false);
   });
 });

@@ -125,7 +125,7 @@ const chips = await connect({
   // A person's Restart (Chips ADR 0094), heard only where the bridge runs OpenCode's server: one a
   // person runs themselves isn't the bridge's to restart, so this connection doesn't say it hears them.
   ...(server === undefined ? {} : { onRestart: () => bridge?.restart() }),
-  // What a person changes of an agent from its page (Chips ADR 0241): its model.
+  // What a person changes of an agent from its page (Chips ADR 0241): its model and its files.
   settings: settingsFor(() => bridge),
 });
 
@@ -143,7 +143,7 @@ bridge = new Bridge({
   saveState: (next) => writeFileSync(statePath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 }),
   log,
   restartServer: server?.restart,
-  ...(config.directory === undefined ? { folders: config.folders } : {}),
+  ...(config.directory === undefined ? { folders: config.folders } : { directory: config.directory }),
 });
 await bridge.start();
 log(`answering for ${config.agents.map((agent) => agent.name).join(", ")} through OpenCode at ${address.url}`);

@@ -14,7 +14,8 @@ server (`opencode serve`, 2.0).
   room, in the same folder: it remembers what the agent did there, and from then on the two
   remember apart.
 - Restart on the harness's page restarts the OpenCode server the bridge runs (see [Restart](#restart)).
-- Each agent's page shows its model, which a person may change there (see [Models](#models)).
+- Each agent's page shows its model and the files OpenCode builds it from, which a person may
+  change there (see [Models](#models) and [Context files](#context-files)).
 
 Apache-2.0. Not published: a local repository until Chips's SDK is.
 
@@ -31,6 +32,7 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | Files in the reply | each `MEDIA:<path>` line of its own in the answer, taken out of the words and sent from the session's folder (the agent's own), as OpenCode says it (each turn is told how); a file outside it is refused, and the reply says so |
 | Cost and tokens | each model call's `session.step.ended`: OpenCode's own cost, as a step's share |
 | The context gauge | the last call's tokens against the model's window from `GET /api/model` |
+| An agent's files (Chips ADRs 0134, 0241) | the `AGENTS.md` files OpenCode reads for its folder, and from OpenCode 2.0.30 (`GET /api/info`) the files its config's `instructions` names (`GET /api/config`); a person's edit saved where OpenCode reads it (see [Context files](#context-files)) |
 | An agent's model (Chips ADR 0241) | the models `GET /api/model` lists that OpenCode runs, each with its variants as levels; a person's pick put on the agent's session before its next message with `POST /api/session/{id}/model` (see [Models](#models)) |
 | An approval card | `permission.asked` → `POST …/permission/{id}/reply`: `always` when a person said always, else `once`, and `once` for a command, which Chips remembers by how each part starts (Chips ADR 0239); `reject` with their reason for a no. One answered in OpenCode's own apps is settled in Chips (ADR 0079) |
 | A question | a `form.created` whose fields are choices or yes-or-no, at most four → `POST …/form/{id}/reply` |
@@ -55,7 +57,7 @@ Not yet:
   OpenCode's own apps.
 - A question answered in OpenCode's own apps stays open in Chips. The protocol has no way to take
   one back yet.
-- OpenCode's commands, skills and context files in Chips.
+- OpenCode's commands and skills in Chips.
 - Fork for a bridge that joined from the gallery: its card grants `agents` and `new_agents`. A
   bridge that joins with a code asks for `new_spaces` and `forks` as well.
 - More than one OpenCode server per bridge.
@@ -75,6 +77,28 @@ already, and a new session is made on it. Picking the default again puts the age
 on that before their next message. A copy made by Fork runs on what its original runs on. OpenCode
 takes any model there, so the bridge refuses one its catalogue doesn't run, and a level its model
 doesn't have, in so many words.
+
+## Context files
+
+An agent's Context group in Chips (Chips ADRs 0134, 0241) lists the files OpenCode 2 builds it
+from. OpenCode reads `AGENTS.md` only, never `CLAUDE.md` in its place: its own
+(`~/.config/opencode/AGENTS.md`), then the `AGENTS.md` of the agent's folder and of each folder
+above it, up to your home folder, or for a folder outside it up to its project's root. From 2.0.30
+it reads after them the files its config's `instructions` names. It reads them all again before
+each model call and tells the agent what changed, so an edit applies from its next message.
+
+- The agent's own, which a person may change from its page: its folder's `AGENTS.md`, shown empty
+  until there is one, and any file `instructions` finds in its folder.
+- The harness's own set, on its page: `~/chips-opencode/agents/AGENTS.md`, which every agent
+  reads and a person may change; any `AGENTS.md` above it; and your own, with the files
+  `instructions` names elsewhere, which your own OpenCode reads too, so they are shown and not
+  changed.
+
+An edit is saved only if the file is still the one the person changed; otherwise Chips says it
+changed meanwhile. A copy made by Fork works in its original's folder, so it reads the same files.
+A URL in `instructions` isn't shown, nor is the `AGENTS.md` of a folder inside the agent's, which
+OpenCode reads only once the agent reads a file there. With a `directory` in the config, every
+agent's own files are that project's.
 
 ## Restart
 
