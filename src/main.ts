@@ -27,6 +27,7 @@ import { keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { OpenCodeClient } from "./opencode.js";
 import { type OwnServer, ownServer, ServerError } from "./server.js";
 import { type Config, checkOpenCode, hostOf, readConfig, SetupError, STILL_GOOD } from "./setup.js";
+import { VERSION } from "./version.js";
 
 const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 const link = process.env["CHIPS_JOIN_LINK"] || undefined;
@@ -103,7 +104,7 @@ const joined = await joinChips({
   link,
   url: process.env["CHIPS_URL"],
   name: config.name,
-  software: "chips-opencode 1.0.0",
+  software: `chips-opencode ${VERSION}`,
   wants: wantsFor(server !== undefined),
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
 }).catch(refused);
@@ -120,7 +121,7 @@ let bridge: Bridge | undefined;
 const chips = await connect({
   url: joined.url,
   token: joined.token,
-  client: { name: "chips-opencode", version: "1.0.0" },
+  client: { name: "chips-opencode", version: VERSION },
   store: fileStore(join(folder, "chips-state.json")),
   // A person's Restart (Chips ADR 0094), heard only where the bridge runs OpenCode's server: one a
   // person runs themselves isn't the bridge's to restart, so this connection doesn't say it hears them.

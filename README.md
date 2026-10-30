@@ -21,7 +21,7 @@ server (`opencode serve`, 2.0).
 A bridge that joins with a code asks for all of these. One that joined from Chips's gallery does
 what its card grants: a link carries what the person chose on it, not what the bridge asks for.
 
-Apache-2.0. Not published: a local repository until Chips's SDK is.
+Apache-2.0, published on npm as `@chipschat/opencode`.
 
 ## What Chips shows
 
@@ -144,22 +144,22 @@ gets Restart once you turn it on on its page.
 
 ## From Chips's gallery
 
-The card's line is `chips connect opencode '<link>'` (Chips ADR 0218). It downloads this bridge as the npm package
+The card's line is `CHIPS_JOIN_LINK='<link>' chips connect opencode` (Chips ADR 0218). It downloads this bridge as the npm package
 `@chipschat/opencode`, the newest 1.x, checks it against the registry's checksum, and runs it on the Node
 that Chips carries, so the machine needs no Node or npm of its own. The bridge checks OpenCode,
 joins, and keeps itself running from login. `chips disconnect opencode` stops it. On another computer,
-`curl -fsSL https://chipschat.ai/install | sh -s -- connect opencode '<link>'` installs Chips there
+`curl -fsSL https://chipschat.ai/install | CHIPS_JOIN_LINK='<link>' sh -s -- connect opencode` installs Chips there
 first. The steps below run the bridge from this checkout instead, to work on it.
 
 ## Run it
 
 1. Install OpenCode (opencode.ai), and `npm install` once in this repository.
 
-2. Join Chips once, with a link from Chips's gallery (Add an agent → OpenCode), whose card gives
+2. Join Chips once, with a link from Chips's gallery (Agents → Connect a harness → OpenCode), whose card gives
    this line with the link in it:
 
    ```
-   cd ~/Work/Chips/chips-opencode && CHIPS_JOIN_LINK='<link>' npm run keep
+   cd chips-opencode && CHIPS_JOIN_LINK='<link>' npm run keep
    ```
 
    The bridge runs OpenCode's server itself (`opencode serve` on `127.0.0.1`, 4096 when it is
