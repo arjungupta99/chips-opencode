@@ -3,6 +3,10 @@
   "version": "1.0.9",
   "description": "OpenCode as a Chips harness, on its V2 server (opencode serve): each OpenCode agent a Chips agent, each room an OpenCode session.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arjungupta99/chips-opencode.git"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
