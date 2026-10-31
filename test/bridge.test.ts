@@ -431,6 +431,30 @@ describe("a turn", () => {
     assert.match(prompt, /Shorter, please$/);
   });
 
+  it("tells a session the room's rules once, and again after it compacts (Chips ADR 0250)", async () => {
+    const { chips, opencode } = await rig();
+    const turn = async (words: string, count: number) => {
+      await chips.say(words);
+      await chips.waitFor(
+        (event) => (event.type === "run.completed" && opencode.prompts.length === count ? event : undefined),
+        3000,
+      );
+    };
+    await turn("one", 1);
+    await turn("two", 2);
+    await turn("full", 3);
+    await turn("three", 4);
+    const [first, second, filling, after] = opencode.prompts.map((each) => each.text);
+    for (const rule of ["Everyone here reads what you write.", "MEDIA:<path>"]) {
+      assert.ok(first?.includes(rule), rule);
+      assert.ok(!second?.includes(rule), rule);
+      assert.ok(!filling?.includes(rule), rule);
+      assert.ok(after?.includes(rule), rule);
+    }
+    assert.match(second ?? "", /In this space:/);
+    assert.match(second ?? "", /two$/);
+  });
+
   it("keeps one OpenCode session per room, and a second message is the same session", async () => {
     const { chips, opencode, state } = await rig();
     await chips.say("one");

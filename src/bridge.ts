@@ -11,7 +11,8 @@
  *
  * A message for an agent is a run:
  * - The words go to the session's inbox (`POST …/prompt`): the room note, what was said, and the
- *   words. The run is the session's work from the moment it takes them until it is idle again.
+ *   words; the room's rules once a session, and again after it compacts (Chips ADR 0250). The
+ *   run is the session's work from the moment it takes them until it is idle again.
  * - Its reasoning, interim words and retries are the run's status.
  * - Its tool calls are steps, drawn by kind. A sub-agent is a step, and its child session's cost
  *   and asks are the run's.
@@ -58,7 +59,15 @@ import type {
   SpaceAsked,
   Speaker,
 } from "@chipschat/harness";
-import { heldNote, promptFor, pushedInWords, Refuse, sendAnswer } from "@chipschat/harness";
+import {
+  heldNote,
+  promptFor,
+  pushedInWords,
+  Refuse,
+  rulesFor,
+  SessionRules,
+  sendAnswer,
+} from "@chipschat/harness";
 import {
   type AgentAsked,
   type AgentFork,
@@ -306,6 +315,8 @@ export class Bridge {
   private readonly rooms = new Map<string, Room>();
   /** The turn going in each OpenCode session. */
   private readonly turns = new Map<string, Turn>();
+  /** The room's rules each session holds (Chips ADR 0250): said once, and again after it compacts. */
+  private readonly rules = new SessionRules();
   /**
    * What a session said while it was being given a turn's words, before the turn was known: OpenCode
    * may say it took them before it answers that it has them. Heard by the turn once it is.
@@ -914,6 +925,8 @@ export class Bridge {
    * refused after all, in OpenCode's words.
    */
   private compactionHeard(sessionId: string, event: OpenCodeEvent): void {
+    // What it keeps of the room's rules is its summary's to say: they are said again (Chips ADR 0250).
+    if (event.type === "session.compaction.started") this.rules.forget(sessionId);
     const who = this.whoseSession(sessionId);
     const kept = who === undefined ? undefined : this.options.state.windows?.[who];
     if (who === undefined || kept === undefined) return;
@@ -1084,16 +1097,20 @@ export class Bridge {
     const speaker = speakerId === undefined ? this.options.chips : this.options.chips.as(speakerId);
     const run = await speaker.runs.start({ spaceId, goal: goal ?? goalOf(message, agent.config.name) });
     const readied = await this.projectFor(room, speakerId ?? agent.agentId);
-    const text = promptFor(message, {
+    const asked = {
       ...(speakerId === undefined ? {} : { taker: speakerId }),
       sayWho: saysWho !== true,
       sendsFiles: true,
       project: readied?.facts,
-    });
+    };
+    // A session told the room's rules isn't told them again until they change or it compacts.
+    const rules = rulesFor(message, asked);
+    const said = (session: string) =>
+      promptFor(message, { ...asked, rulesHeld: this.rules.holds(session, rules) });
     let sessionId: string;
     let given: string;
     try {
-      ({ sessionId, given } = await this.give(room, text));
+      ({ sessionId, given } = await this.give(room, said, rules));
     } catch (error) {
       await this.failed(run, `${agent.config.name} couldn't reach OpenCode: ${messageOf(error)}`, true);
       return;
@@ -1149,7 +1166,11 @@ export class Bridge {
   }
 
   /** The words into the room's session: the one it had, or a new one when OpenCode no longer has it. */
-  private async give({ id, who, agent, spaceId }: Room, text: string): Promise<{ sessionId: string; given: string }> {
+  private async give(
+    { id, who, agent, spaceId }: Room,
+    said: (sessionId: string) => string,
+    rules: string,
+  ): Promise<{ sessionId: string; given: string }> {
     const { opencode, state, saveState } = this.options;
     let kept = state.sessions[id];
     // A copy's session is saved once Chips has it: its first words wait, not to start a blank one.
@@ -1160,7 +1181,7 @@ export class Bridge {
     if (kept !== undefined) {
       try {
         await this.modelled(kept, { who, agent });
-        return { sessionId: kept, given: await this.prompted(kept, text) };
+        return { sessionId: kept, given: await this.prompted(kept, said(kept), rules) };
       } catch (error) {
         if (!(error instanceof OpenCodeError && error.tag === "SessionNotFoundError")) throw error;
         this.log(`${agent.config.name}'s session for ${spaceId} is gone from OpenCode: a new one`);
@@ -1176,7 +1197,7 @@ export class Bridge {
     });
     state.sessions[id] = made;
     saveState(state);
-    return { sessionId: made, given: await this.prompted(made, text) };
+    return { sessionId: made, given: await this.prompted(made, said(made), rules) };
   }
 
   /**
@@ -1254,12 +1275,18 @@ export class Bridge {
   }
 
   /** A turn's first words into a session, what it says meanwhile held for the turn. */
-  private async prompted(sessionId: string, text: string): Promise<string> {
+  /**
+   * A turn's words given to a session, which is told the room's rules they carry as they are
+   * given, so a compaction heard during the turn forgets them (Chips ADR 0250).
+   */
+  private async prompted(sessionId: string, text: string, rules: string): Promise<string> {
     this.early.set(sessionId, []);
+    this.rules.told(sessionId, rules);
     try {
       return await this.options.opencode.prompt(sessionId, text);
     } catch (error) {
       this.early.delete(sessionId);
+      this.rules.forget(sessionId);
       throw error;
     }
   }
