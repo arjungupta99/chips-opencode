@@ -1844,7 +1844,7 @@ export function cardOf(
     const patch = files.map((file) => text(file["patch"]) ?? "").filter((each) => each !== "").join("\n");
     return {
       action: { kind: "file.edit", input: { files: resources } },
-      question: one === undefined ? "Change these files?" : `Change ${baseName(one)}?`,
+      question: one === undefined ? "Change these files?" : `Change ${cut(baseName(one), QUESTION_MAX - 8)}?`,
       risk: [],
       ...(patch === "" ? {} : { preview: { format: "diff" as const, title: one ?? "Changes", body: patch.slice(0, 200_000) } }),
       ...effect,
@@ -1862,7 +1862,7 @@ export function cardOf(
   const what = resources.filter((each) => each !== "*").join(", ");
   return {
     action: { kind: `opencode.${action.toLowerCase().replace(/[^a-z0-9_]+/g, "_") || "act"}`, input: { resources } },
-    question: `${verb}${what === "" ? "" : ` ${what}`}?`.slice(0, 300),
+    question: `${verb}${what === "" ? "" : ` ${cut(what, QUESTION_MAX - verb.length - 2)}`}?`,
     risk: action === "webfetch" || action === "websearch" ? ["external"] : [],
     ...effect,
   };
@@ -1975,6 +1975,9 @@ export function secondLook(who: string, reply: string | undefined, note: string 
 }
 
 /** At most `most` characters, the last of them an ellipsis where it was cut. */
+/** The most an approval's question holds: the protocol's `maxLength`, past which Chips refuses the ask. */
+const QUESTION_MAX = 200;
+
 function cut(words: string, most: number): string {
   return words.length <= most ? words : `${words.slice(0, most - 1)}…`;
 }

@@ -1,7 +1,8 @@
 /**
  * A scripted OpenCode V2 server for the tests, on OpenCode's own routes and event shapes: a
  * session plays by the words it was given.
- * - `ask` asks permission before running a command, and says the decision it was given.
+ * - `ask` asks permission before running a command, and says the decision it was given; `fetch`,
+ *   the same to open a page whose address is longer than an approval's question may be.
  * - `elsewhere` asks, and is answered in OpenCode's own apps.
  * - `question` asks a question by its form, and says the answer.
  * - `delegate` hands work to a sub-agent in a child session that says what it cost.
@@ -88,6 +89,9 @@ export const THOUGHTFUL = "Here it is:\n\n| Model | Score |\n|---|---|\n| A | 1 
 
 /** What a second look answers. */
 export const AGAIN = "You're right: Sunday it is. I read the dates again.";
+
+/** A page's address longer than the protocol lets an approval's question be. */
+export const LONG_URL = `https://example.com/search?q=${"chips+".repeat(40)}end`;
 
 /** A session's copy: the session copied, and the copy. */
 export interface Forked {
@@ -263,6 +267,16 @@ export async function startFakeOpenCode(
       let decision: unknown;
       await step(session, async (message) => {
         decision = await ask(session, message, "per_1", "npm test");
+      });
+      return step(session, async (message) => say(session, message, `Given: ${String(decision)}`));
+    }
+    if (/\bfetch\b/.test(words)) {
+      let decision: unknown;
+      await step(session, async (message) => {
+        tool(session, message, "call_3", "webfetch", { url: LONG_URL });
+        emit("permission.asked", { id: "per_3", sessionID: session.id, action: "webfetch", resources: [LONG_URL], source: { type: "tool", messageID: message, id: "call_3" } });
+        decision = await waitFor("per_3");
+        toolDone(session, message, "call_3", "");
       });
       return step(session, async (message) => say(session, message, `Given: ${String(decision)}`));
     }

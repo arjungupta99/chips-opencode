@@ -28,7 +28,7 @@ import {
 } from "../src/bridge.ts";
 import { OpenCodeClient } from "../src/opencode.ts";
 import { ServerError } from "../src/server.ts";
-import { AGAIN, type FakeOpenCode, startFakeOpenCode, THOUGHTFUL } from "./fake-opencode.ts";
+import { AGAIN, type FakeOpenCode, LONG_URL, startFakeOpenCode, THOUGHTFUL } from "./fake-opencode.ts";
 
 interface Rig {
   readonly chips: FakeChips;
@@ -520,6 +520,21 @@ describe("what it asks", () => {
     const executed = await sent(chips, "approval.executed");
     assert.equal(executed.payload["outcome"], "executed", "the allowed call said how it went");
     assert.deepEqual(opencode.permissionReplies, [{ requestId: "per_1", decision: "once", message: undefined }]);
+  });
+
+  it("cuts a long address short, keeping the question to the protocol's 200 characters", async () => {
+    const { chips, opencode } = await rig();
+    await chips.say("fetch it");
+    const asked = await sent(chips, "approval.request");
+    const question = String(asked.payload["question"]);
+    assert.equal(question.length, 200);
+    assert.ok(question.startsWith("Open https://example.com/search?q=chips+"));
+    assert.ok(question.endsWith("…?"));
+    // The whole address is still in the action.
+    assert.deepEqual(asked.payload["action"], { kind: "opencode.webfetch", input: { resources: [LONG_URL] } });
+    await chips.decide(String(asked.payload["approval_id"]), "approved");
+    assert.equal((await reply(chips, asked.run_id)).payload["text"], "Given: once");
+    assert.deepEqual(opencode.permissionReplies, [{ requestId: "per_3", decision: "once", message: undefined }]);
   });
 
   it("gives OpenCode reject, and the person's reason, when they say no", async () => {
