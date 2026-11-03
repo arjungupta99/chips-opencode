@@ -197,8 +197,7 @@ npm test
 
 They run the bridge against Chips's conformance fake and a scripted OpenCode server
 (`test/fake-opencode.ts`), on OpenCode's own routes and event shapes. That includes Chips's golden
-scenario. The SDK and the kit are in `vendor/`, packed from a Chips checkout with
-`pnpm release:sdk <this repo>/vendor`.
+scenario. The SDK and the kit come from npm, at the version `package.json` pins.
 
 ```
 npm run e2e
