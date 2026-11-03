@@ -344,6 +344,8 @@ export class Bridge {
   private wake: (() => void) | undefined;
   /** A person's Restart under way: nothing is said of how it is meanwhile (Chips ADR 0094). */
   private restarting: Promise<void> | undefined;
+  /** Restarts begun, so a health check asked before one, and answered after, is let go. */
+  private restarts = 0;
   /** Why OpenCode's server isn't there, where the bridge knows more than that it doesn't answer. */
   private why: string | undefined;
 
@@ -412,6 +414,7 @@ export class Bridge {
    * doesn't run the server, which never says it hears restarts.
    */
   restart(): Promise<void> {
+    if (this.restarting === undefined) this.restarts += 1;
     this.restarting ??= (async () => {
       try {
         await this.restartServer();
@@ -485,12 +488,14 @@ export class Bridge {
 
   /**
    * Trouble while the server doesn't answer, and fine once it does (ADR 0083). Nothing while a
-   * restart is under way: its end says (ADR 0094).
+   * restart is under way: its end says (ADR 0094). Nor an answer to a check asked before a restart
+   * began, even one over by now: it is of the server before, and a failed restart's words would go.
    */
   private async sayHowItIs(): Promise<void> {
     if (this.restarting !== undefined) return;
+    const restarts = this.restarts;
     const up = await this.options.opencode.healthy();
-    if (this.restarting !== undefined) return;
+    if (this.restarts !== restarts) return;
     if (up) this.why = undefined;
     const chips = this.options.chips;
     await (up ? chips.reportOk() : chips.reportTrouble(this.why ?? "OpenCode isn't answering")).catch(() => undefined);

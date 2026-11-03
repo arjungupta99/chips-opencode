@@ -934,6 +934,34 @@ describe("a person's Restart (Chips ADR 0094)", () => {
     await until(() => chips.statuses().at(-1)?.state === "ok");
   });
 
+  it("keeps a failed restart's words over a health check asked before it began", async () => {
+    const { chips, opencode, lines } = await rig({
+      restartServer: async (server) => {
+        server.up = false;
+        throw new ServerError("OpenCode's server didn't start again: no provider is configured");
+      },
+    });
+    const why = "OpenCode's server didn't start again: no provider is configured";
+    // A health check asked while the server is up, its answer held until the restart has failed.
+    let release = () => {};
+    opencode.held = new Promise((resolve) => (release = resolve));
+    const asked = opencode.infoAsked;
+    await until(() => opencode.infoAsked > asked);
+    const before = chips.statuses().length;
+    assert.equal(chips.askToRestart(), 1);
+    await until(() => lines.some((line) => line.startsWith("OpenCode's server isn't back")));
+    opencode.held = undefined;
+    release();
+    await until(() => chips.statuses().length > before);
+    await sleep(200);
+    const after = chips.statuses().slice(before);
+    assert.ok(after.length > 0);
+    assert.ok(
+      after.every((status) => status.state === "trouble" && status.reason === why),
+      `the restart's words, never fine: ${JSON.stringify(after)}`,
+    );
+  });
+
   it("asks for restarts, and hears them, only where it runs the server", async () => {
     assert.ok(wantsFor(true).includes("restarts"));
     assert.deepEqual(wantsFor(false), WANTS);

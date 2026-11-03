@@ -130,6 +130,10 @@ export interface FakeOpenCode {
   readonly interrupts: string[];
   readonly withdrawn: string[];
   up: boolean;
+  /** How many times `GET /api/info` was asked: the bridge's health checks among them. */
+  infoAsked: number;
+  /** While set, `GET /api/info` waits for it, then answers as the server was when asked. */
+  held: Promise<void> | undefined;
   /** A session OpenCode no longer has. */
   forget(sessionId: string): void;
   /** What a session remembers. */
@@ -183,6 +187,8 @@ export async function startFakeOpenCode(
     interrupts: [],
     withdrawn: [],
     up: true,
+    infoAsked: 0,
+    held: undefined,
   };
 
   const emit = (type: string, data: Record<string, unknown>) => {
@@ -432,7 +438,12 @@ export async function startFakeOpenCode(
       const url = new URL(request.url ?? "/", "http://fake");
       const method = request.method ?? "GET";
       const path = url.pathname;
-      if (!fake.up) return json(response, 503, { _tag: "Unavailable", message: "down" });
+      const up = fake.up;
+      if (method === "GET" && path === "/api/info") {
+        fake.infoAsked += 1;
+        await fake.held;
+      }
+      if (!up) return json(response, 503, { _tag: "Unavailable", message: "down" });
       if (request.headers.authorization !== auth) return json(response, 401, { _tag: "UnauthorizedError", message: "Authentication required" });
       if (method === "GET" && path === "/api/info") {
         return json(response, 200, { version: options.version ?? "2.0.29", pid: options.pid ?? 1, urls: [], paths: { tmp: "/tmp" } });
