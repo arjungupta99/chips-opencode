@@ -307,6 +307,8 @@ describe("a space from the + (Chips ADR 0241)", () => {
     // The first words are the ask's, said once, with who said them and their standing.
     assert.equal(opencode.prompts.length, 1);
     assert.match(opencode.prompts[0]?.text ?? "", /\n\nArjun \(owner\): Plan a weekend in Lisbon for two$/);
+    // Told of the space on its first turn, as Chips wrote it for the harness (Chips ADR 0092's addendum).
+    assert.match(opencode.prompts[0]?.text ?? "", /In this space: .*and you, Milo/);
   });
 
   it("names a space from the first line of what it is for", () => {

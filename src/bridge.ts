@@ -60,13 +60,14 @@ import type {
   Speaker,
 } from "@chipschat/harness";
 import {
+  firstTurnOf,
   heldNote,
   promptFor,
   pushedInWords,
   Refuse,
   rulesFor,
-  SessionRules,
   sendAnswer,
+  SessionRules,
 } from "@chipschat/harness";
 import {
   type AgentAsked,
@@ -566,23 +567,27 @@ export class Bridge {
     this.log(`${agent.name} claimed ${spaceId}`);
     await this.sendModel(agent.agentId);
     await this.sendContexts();
-    // Who said them, as the space's lines name them, with their standing (Chips SEC-49).
+    // Who said them, as the space's lines name them, with their standing (Chips SEC-49), for
+    // words read from the room's history; heard live, they come as Chips said them, with the
+    // room's note Chips wrote for the harness before the agent was made (Chips ADR 0092's addendum).
     const context = await chips.roomContext(spaceId, { limit: 20 }).catch(() => undefined);
     const said = context?.lines.find((line) => line.message_id === firstMessage.messageId)?.from;
-    const message = {
-      type: "message.new",
-      space_id: spaceId,
-      message_id: firstMessage.messageId,
-      text: firstMessage.text,
-      from: {
-        participant_id: asked.askedBy,
-        kind: "person",
-        display_name: said?.name ?? "Someone",
-        role: said?.role ?? "member",
-        ...(said?.workspace_role === undefined ? {} : { workspace_role: said.workspace_role }),
-      },
-      for: [agent.agentId],
-    } as unknown as MessageNew;
+    const message =
+      firstTurnOf(asked, agent.agentId) ??
+      ({
+        type: "message.new",
+        space_id: spaceId,
+        message_id: firstMessage.messageId,
+        text: firstMessage.text,
+        from: {
+          participant_id: asked.askedBy,
+          kind: "person",
+          display_name: said?.name ?? "Someone",
+          role: said?.role ?? "member",
+          ...(said?.workspace_role === undefined ? {} : { workspace_role: said.workspace_role }),
+        },
+        for: [agent.agentId],
+      } as unknown as MessageNew);
     await this.hear(message);
   }
 
