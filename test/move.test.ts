@@ -62,6 +62,11 @@ describe("where things are kept", () => {
     assert.equal(configPathOf(undefined, home), at(".chips-opencode/config.json"));
   });
 
+  it("uses the old place while its folder is there, with no config in it", () => {
+    put(".chips-opencode/server.json", "{}");
+    assert.equal(configPathOf(undefined, home), at(".chips-opencode/config.json"));
+  });
+
   it("gives the agents their folders in ~/Chips/Agents/opencode", () => {
     assert.equal(readConfig(at("Chips/.bridges/opencode/config.json"), {}).folders, at("Chips/Agents/opencode"));
   });
