@@ -6,11 +6,11 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { filledIn, type StopWords } from "@chipschat/harness";
 import type { AgentConfig } from "./bridge.js";
 import { type AgentInfo, OpenCodeError } from "./opencode.js";
+import { foldersPathOf, fromHome, placesOf } from "./places.js";
 
 export interface Config {
   readonly name: string;
@@ -55,7 +55,6 @@ export const hostOf = (url: string) => {
 
 export const STILL_GOOD = "The link is still good: run the same command again once that's done.";
 
-const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 
 /** The config at `path`, or the defaults when there is none, with the password from the environment. */
 export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): Config {
@@ -86,8 +85,8 @@ export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
     password,
     passwordEnv,
     ownServer,
-    directory: typeof raw["directory"] === "string" ? resolve(home(raw["directory"])) : undefined,
-    folders: resolve(home(typeof raw["folders"] === "string" ? raw["folders"] : "~/chips-opencode/agents")),
+    directory: typeof raw["directory"] === "string" ? resolve(fromHome(raw["directory"])) : undefined,
+    folders: foldersPathOf(typeof raw["folders"] === "string" ? raw["folders"] : placesOf().agents),
     agents,
   };
 }

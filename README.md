@@ -92,7 +92,7 @@ each model call and tells the agent what changed, so an edit applies from its ne
 
 - The agent's own, which a person may change from its page: its folder's `AGENTS.md`, shown empty
   until there is one, and any file `instructions` finds in its folder.
-- The harness's own set, on its page: `~/chips-opencode/agents/AGENTS.md`, which every agent
+- The harness's own set, on its page: `~/Chips/Agents/opencode/AGENTS.md`, which every agent
   reads and a person may change; any `AGENTS.md` above it; and your own, with the files
   `instructions` names elsewhere, which your own OpenCode reads too, so they are shown and not
   changed.
@@ -163,7 +163,7 @@ first. The steps below run the bridge from this checkout instead, to work on it.
    ```
 
    The bridge runs OpenCode's server itself (`opencode serve` on `127.0.0.1`, 4096 when it is
-   free), with a password it makes and keeps in `~/.chips-opencode/server.json`, readable by you
+   free), with a password it makes and keeps in `~/Chips/.bridges/opencode/server.json`, readable by you
    only: nobody starts a server or makes up a password. While the bridge runs, a server that stops
    is started again; when the bridge stops, so does its server.
 
@@ -177,12 +177,21 @@ first. The steps below run the bridge from this checkout instead, to work on it.
    two answer twice. The key Chips gives it is kept; a new link from Chips replaces it. Or join with
    `CHIPS_URL` and a code a person allows.
 
-3. Optionally, name the agents in `~/.chips-opencode/config.json` (see `config.example.json`).
+3. Optionally, name the agents in `~/Chips/.bridges/opencode/config.json` (see `config.example.json`).
    Without a config it is OpenCode's `build` agent, named OpenCode.
 
-   Each agent's sessions work in a folder of its own, `~/chips-opencode/agents/<its name>`, made
+   Each agent's sessions work in a folder of its own, `~/Chips/Agents/opencode/<its name>`, made
    the first time it is spoken to and kept after a rename; `folders` moves them. A `directory`
    puts every session in that one project instead, a repository the agents share.
+
+   Everything the bridge keeps is under `~/Chips` (Chips ADR 0283): its config, sessions, server
+   password and state in `~/Chips/.bridges/opencode`, the agents' folders in
+   `~/Chips/Agents/opencode`, where its own server runs from. Until 1.0.15 they were
+   `~/.chips-opencode` and `~/chips-opencode/agents`. The first start of 1.0.15 moves them and the
+   folder paths it saved, and once OpenCode answers, asks it to move each session of a folder that
+   moved (`POST /api/session/:id/move`), with everything said in it: OpenCode won't use a session
+   whose folder is gone. It renames and never copies; where something is at the new place already it
+   moves in what isn't there yet and says in its log what it left.
 
    **A server of your own.** To use an `opencode serve` you run yourself, give its password in the
    environment variable `passwordEnv` names (`OPENCODE_PASSWORD` by default, never in the file),

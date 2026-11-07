@@ -210,6 +210,14 @@ export class OpenCodeClient {
     return { id, metadata: typeof metadata === "object" && metadata !== null ? (metadata as Record<string, unknown>) : {} };
   }
 
+  /**
+   * A session moved to another folder (2.0.25), with everything said in it; the session's context
+   * says it moved. It works where the old folder is gone, as after Chips ADR 0283's move.
+   */
+  async moveSession(sessionId: string, directory: string): Promise<void> {
+    await this.call("POST", `/api/session/${encodeURIComponent(sessionId)}/move`, { directory });
+  }
+
   /** A session's title, or its metadata, which this replaces whole. */
   async update(
     sessionId: string,

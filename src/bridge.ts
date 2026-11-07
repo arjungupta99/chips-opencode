@@ -122,6 +122,11 @@ export interface BridgeState {
   forks?: Record<string, { readonly session?: string; readonly folder?: string }>;
   /** Each agent's own model and level, picked in Chips (Chips ADR 0241), by whose sessions they are. */
   models?: Record<string, ModelPick>;
+  /**
+   * Sessions whose folder moved to `~/Chips` (Chips ADR 0283), each to the folder it is now, until
+   * OpenCode has moved them (`move.ts`).
+   */
+  moving?: Record<string, string>;
   /** How full each agent last said it was, by whose sessions they are (Chips ADRs 0146, 0241). */
   windows?: Record<string, KeptWindow>;
 }

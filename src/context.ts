@@ -157,7 +157,7 @@ export class ContextFiles {
     private readonly folders: string | undefined,
   ) {}
 
-  /** `~/chips-opencode/agents/AGENTS.md`, or the whole path where it isn't in the home. */
+  /** `~/Chips/Agents/opencode/AGENTS.md`, or the whole path where it isn't in the home. */
   private tilde(path: string): string {
     const { home } = this.places;
     return within(path, home) ? `~${path.slice(home.length)}` : path;

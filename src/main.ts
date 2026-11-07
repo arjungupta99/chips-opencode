@@ -3,39 +3,43 @@
  * Chips (`CHIPS_JOIN_LINK`), or with a code a person allows — and keeps its key; then it connects,
  * registers its agents, and answers for them through OpenCode until it is stopped.
  *
- * The config is JSON, `~/.chips-opencode/config.json` unless a path is given, and may be left out:
+ * The config is JSON, `~/Chips/.bridges/opencode/config.json` unless a path is given, and may be left out:
  *
  *     { "url": "http://127.0.0.1:4096", "passwordEnv": "OPENCODE_PASSWORD",
- *       "folders": "~/chips-opencode/agents",
+ *       "folders": "~/Chips/Agents/opencode",
  *       "agents": [{ "name": "OpenCode", "agent": "build" }, { "name": "Planner", "agent": "plan" }] }
  *
  * Without one it is OpenCode's `build` agent, named OpenCode, on `opencode serve`'s own address.
  * Each agent's sessions work in a folder of its own under `folders`; a `directory` puts them all
  * in that one project instead. The server's password is read from the environment variable `passwordEnv`
  * names, never written in the file. What it keeps is beside the config: the SDK's state (cursor,
- * unanswered events, runs not ended) and which session each room is.
+ * unanswered events, runs not ended) and which session each room is. An install from before 1.0.15,
+ * in `~/.chips-opencode` and `~/chips-opencode/agents`, is moved to `~/Chips` first, and its
+ * sessions with it once OpenCode answers (`move.ts`, Chips ADR 0283).
  *
  * `npm run keep` is the same, then keeps the bridge running from login (`keep.ts`).
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
 import { Bridge, type BridgeState, settingsFor, wantsFor } from "./bridge.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
+import { moveOld, moveSessions } from "./move.js";
 import { OpenCodeClient } from "./opencode.js";
+import { configPathOf, configTargetOf } from "./places.js";
 import { type OwnServer, ownServer, ServerError } from "./server.js";
 import { type Config, checkOpenCode, hostOf, readConfig, SetupError, STILL_GOOD } from "./setup.js";
 import { VERSION } from "./version.js";
 
-const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 const link = process.env["CHIPS_JOIN_LINK"] || undefined;
 
 const LABEL = "chat.chips.opencode";
 stopIfAsked(LABEL);
-const configPath = resolve(home(words[0] ?? "~/.chips-opencode/config.json"));
 const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
+// What it kept before 1.0.15, brought across to ~/Chips first, so everything after reads it there.
+moveOld(configTargetOf(words[0]), log);
+const configPath = configPathOf(words[0]);
 const stop = (error: unknown): never => {
   if (!(error instanceof SetupError)) throw error;
   // Where it stopped, in a few words for Chips for Mac's sheet; the whole sentence for a terminal.
@@ -57,7 +61,8 @@ const statePath = join(folder, "sessions.json");
 let server: OwnServer | undefined;
 if (link !== undefined) reportStep("checking", { detail: "Looking for OpenCode" });
 if (config.ownServer) {
-  const cwd = config.directory ?? dirname(config.folders);
+  // Its own folder, `~/Chips/Agents/opencode`, not the one every harness's agents share above it.
+  const cwd = config.directory ?? config.folders;
   mkdirSync(cwd, { recursive: true });
   try {
     server = await ownServer({ folder, cwd, log });
@@ -116,6 +121,9 @@ keepIfAsked(LABEL, joined.url, [config.passwordEnv], log, () => server?.stop());
 const state: BridgeState = existsSync(statePath)
   ? (JSON.parse(readFileSync(statePath, "utf8")) as BridgeState)
   : { sessions: {} };
+const saveState = (next: BridgeState) => writeFileSync(statePath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+// The sessions of folders that moved to ~/Chips, moved by OpenCode before any is used.
+if (offered !== undefined) await moveSessions(state, opencode, saveState, log);
 
 let bridge: Bridge | undefined;
 const chips = await connect({
@@ -141,7 +149,7 @@ bridge = new Bridge({
   agents: config.agents,
   home: joined.spaceId,
   state,
-  saveState: (next) => writeFileSync(statePath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 }),
+  saveState,
   log,
   restartServer: server?.restart,
   ...(config.directory === undefined ? { folders: config.folders } : { directory: config.directory }),
