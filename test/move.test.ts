@@ -65,6 +65,10 @@ describe("where things are kept", () => {
   it("gives the agents their folders in ~/Chips/Agents/opencode", () => {
     assert.equal(readConfig(at("Chips/.bridges/opencode/config.json"), {}).folders, at("Chips/Agents/opencode"));
   });
+  it("keeps the agents' folders where they were until they move", () => {
+    put("chips-opencode/agents/jens/notes.txt", "Jens's\n");
+    assert.equal(readConfig(at("Chips/.bridges/opencode/config.json"), {}).folders, at("chips-opencode/agents"));
+  });
 });
 
 describe("an install from before 1.0.15", () => {

@@ -24,7 +24,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
 import { Bridge, type BridgeState, settingsFor, wantsFor } from "./bridge.js";
-import { keepIfAsked, stopIfAsked, words } from "./keep.js";
+import { handsOver, keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { moveOld, moveSessions } from "./move.js";
 import { OpenCodeClient } from "./opencode.js";
 import { configPathOf, configTargetOf } from "./places.js";
@@ -37,8 +37,9 @@ const link = process.env["CHIPS_JOIN_LINK"] || undefined;
 const LABEL = "chat.chips.opencode";
 stopIfAsked(LABEL);
 const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
-// What it kept before 1.0.15, brought across to ~/Chips first, so everything after reads it there.
-moveOld(configTargetOf(words[0]), log);
+// What it kept before 1.0.15, brought across to ~/Chips first, so everything after reads it
+// there; by the kept copy, where this run hands over to one (`handsOver`).
+if (!handsOver) moveOld(configTargetOf(words[0]), log);
 const configPath = configPathOf(words[0]);
 const stop = (error: unknown): never => {
   if (!(error instanceof SetupError)) throw error;
