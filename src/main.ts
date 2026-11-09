@@ -72,8 +72,9 @@ if (config.ownServer) {
     stop(
       new SetupError(link === undefined ? error.message : `${error.message} ${STILL_GOOD}`, {
         detail: error.missing ? "OpenCode isn't on this Mac" : "Its server didn't start",
-        says: error.missing ? "OpenCode isn't installed here." : "OpenCode's server didn't start.",
-        doing: error.missing ? "Install OpenCode (opencode.ai), then try again." : error.message,
+        says: error.missing ? "OpenCode isn't installed on this Mac." : "OpenCode's server didn't start.",
+        doing: error.missing ? "Run this in Terminal, then try again." : error.message,
+        ...(error.missing ? { copy: "curl -fsSL https://opencode.ai/install | bash" } : {}),
       }),
     );
   }
