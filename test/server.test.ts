@@ -175,7 +175,7 @@ describe("the bridge's own OpenCode server", () => {
     const folder = mkdtempSync(join(root, "d-"));
     await assert.rejects(
       ownServer({ folder, cwd: folder, env: { PATH: "/usr/bin:/bin" } }),
-      (error: unknown) => error instanceof ServerError && /OpenCode isn't installed on this machine: install it \(opencode\.ai\)/.test(error.message),
+      (error: unknown) => error instanceof ServerError && /OpenCode isn't installed on this machine: install it with `curl -fsSL https:\/\/opencode\.ai\/install \| bash`/.test(error.message),
     );
   });
 

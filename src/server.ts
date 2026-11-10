@@ -14,6 +14,9 @@ import { randomBytes } from "node:crypto";
 import { accessSync, constants, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { delimiter, join } from "node:path";
+
+/** OpenCode's own installer, as its site gives it: the line a stop says to run, as Claude Code's and Codex's do. */
+export const INSTALL_LINE = "curl -fsSL https://opencode.ai/install | bash";
 import { createInterface } from "node:readline";
 
 /** The server the bridge runs, once it answers. */
@@ -164,7 +167,10 @@ export async function ownServer(options: ServerOptions): Promise<OwnServer> {
     if (now === "refused") kept = { port: await freePort(), password: kept.password };
   }
   if (!before && !onPath(command, env)) {
-    throw new ServerError("OpenCode isn't installed on this machine: install it (opencode.ai), then run this again.", true);
+    throw new ServerError(
+      `OpenCode isn't installed on this machine: install it with \`${INSTALL_LINE}\`, then run this again.`,
+      true,
+    );
   }
   kept ??= { port: await freePort(), password: randomBytes(24).toString("base64url") };
   const { port, password } = kept;
@@ -266,7 +272,10 @@ export async function ownServer(options: ServerOptions): Promise<OwnServer> {
   const restart = async () => {
     // Nothing stopped that can't be started again.
     if (!onPath(command, env)) {
-      throw new ServerError("OpenCode isn't installed on this machine any more: install it (opencode.ai), then restart again.", true);
+      throw new ServerError(
+        `OpenCode isn't installed on this machine any more: install it with \`${INSTALL_LINE}\`, then restart again.`,
+        true,
+      );
     }
     log(`restarting OpenCode's server at ${url}`);
     await down();

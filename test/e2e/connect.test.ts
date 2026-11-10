@@ -69,7 +69,7 @@ describe("OpenCode's card, from a link to its hello", { skip, timeout: 180_000 }
   it("stops on each thing not set up, and leaves the link good", async () => {
     // No OpenCode on a PATH of node and the system's.
     const bare = [process.execPath.replace(/\/node$/, ""), "/usr/bin", "/bin"].join(delimiter);
-    await stopped(card.command, /OpenCode isn't installed on this machine: install it \(opencode\.ai\)/, bare);
+    await stopped(card.command, /OpenCode isn't installed on this machine: install it with `curl -fsSL https:\/\/opencode\.ai\/install \| bash`/, bare);
     await stopped(card.command, /OpenCode's server didn't start at http:\/\/127\.0\.0\.1:\d+: Error: no provider is configured/, broken);
     // A person's own server named in the config, without its password; then the config gone again.
     mkdirSync(join(home, ".chips-opencode"), { recursive: true });

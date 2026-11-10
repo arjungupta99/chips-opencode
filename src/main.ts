@@ -28,7 +28,7 @@ import { handsOver, keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { moveOld, moveSessions } from "./move.js";
 import { OpenCodeClient } from "./opencode.js";
 import { configPathOf, configTargetOf } from "./places.js";
-import { type OwnServer, ownServer, ServerError } from "./server.js";
+import { INSTALL_LINE, type OwnServer, ownServer, ServerError } from "./server.js";
 import { type Config, checkOpenCode, hostOf, readConfig, SetupError, STILL_GOOD } from "./setup.js";
 import { VERSION } from "./version.js";
 
@@ -74,7 +74,7 @@ if (config.ownServer) {
         detail: error.missing ? "OpenCode isn't on this Mac" : "Its server didn't start",
         says: error.missing ? "OpenCode isn't installed on this Mac." : "OpenCode's server didn't start.",
         doing: error.missing ? "Run this in Terminal, then try again." : error.message,
-        ...(error.missing ? { copy: "curl -fsSL https://opencode.ai/install | bash" } : {}),
+        ...(error.missing ? { copy: INSTALL_LINE } : {}),
       }),
     );
   }
