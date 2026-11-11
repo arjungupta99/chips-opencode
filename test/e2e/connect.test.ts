@@ -35,13 +35,22 @@ describe("OpenCode's card, from a link to its hello", { skip, timeout: 180_000 }
       (record) => JSON.parse(record) as { harnessId: string; hello: string },
     );
   const hellos = async (spaceId: string) => (await chips.said(spaceId)).filter((each) => HELLO.test(each.text));
-  /** The command run to its end: what not being set up stops it with. */
+  /**
+   * The command run to its end: what not being set up stops it with. One that goes on instead (it
+   * found nothing to stop for, and joined) fails here within a minute and is stopped, so no bridge
+   * is left running to hold the test open.
+   */
   const stopped = async (command: string, says: RegExp, path?: string) => {
     const run = chips.run(command, { folder: here, home, ...(path === undefined ? {} : { path }) });
-    assert.equal(await run.exited, 1, run.output());
-    assert.match(run.output(), says);
-    assert.ok(run.output().includes(STILL_GOOD), run.output());
-    assert.equal((await chips.request(card.requestId)).state, "allowed", "the link is still good");
+    try {
+      const still = new Promise<"still running">((done) => setTimeout(done, 60_000, "still running").unref());
+      assert.equal(await Promise.race([run.exited, still]), 1, run.output());
+      assert.match(run.output(), says);
+      assert.ok(run.output().includes(STILL_GOOD), run.output());
+      assert.equal((await chips.request(card.requestId)).state, "allowed", "the link is still good");
+    } finally {
+      await run.stop();
+    }
   };
 
   before(async () => {
@@ -72,8 +81,10 @@ describe("OpenCode's card, from a link to its hello", { skip, timeout: 180_000 }
     await stopped(card.command, /OpenCode isn't installed on this machine: install it with `curl -fsSL https:\/\/opencode\.ai\/install \| bash`/, bare);
     await stopped(card.command, /OpenCode's server didn't start at http:\/\/127\.0\.0\.1:\d+: Error: no provider is configured/, broken);
     // A person's own server named in the config, without its password; then the config gone again.
-    mkdirSync(join(home, ".chips-opencode"), { recursive: true });
-    const config = join(home, ".chips-opencode", "config.json");
+    // The config is where the bridge reads it now (Chips ADR 0283): one in `~/.chips-opencode`, where
+    // it was before, isn't read once the bridge has made its folder here, and the run would join.
+    mkdirSync(join(home, "Chips", ".bridges", "opencode"), { recursive: true });
+    const config = join(home, "Chips", ".bridges", "opencode", "config.json");
     writeFileSync(config, JSON.stringify({ url: opencode.url }));
     await stopped(card.command, /isn't in \$OPENCODE_PASSWORD: give it the one `opencode serve` at http:\/\/127\.0\.0\.1:\d+/, installed);
     rmSync(config);

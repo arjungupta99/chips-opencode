@@ -8,6 +8,8 @@
  * - `delegate` hands work to a sub-agent in a child session that says what it cost.
  * - `fail` fails.
  * - `slow` writes for a while, unless interrupted.
+ * - `busy` is one long model call, unless interrupted: steering words wait until it ends.
+ * - `tell <name>`, its last words, hands over to that agent after a moment: `@<name> over to you.`
  * - `long` says a first part, then writes the rest for a while, unless interrupted.
  * - Told to carry on after a pause (Chips ADR 0293), it writes the rest for a while, unless
  *   interrupted again, and says it.
@@ -211,7 +213,9 @@ export async function startFakeOpenCode(
     const on = of ?? session.model ?? model;
     emit("session.step.started", { sessionID: session.id, assistantMessageID: message, agent: session.agent, model: on, started: Date.now() });
     await does(message);
-    emit("session.step.ended", { sessionID: session.id, assistantMessageID: message, finish: "stop", cost: 0.0042, tokens: read });
+    // A call that asked for a tool goes on to another; one that didn't has said its answer.
+    const finish = calledTool.delete(message) ? "tool-calls" : "stop";
+    emit("session.step.ended", { sessionID: session.id, assistantMessageID: message, finish, cost: 0.0042, tokens: read });
     session.lastCall = { tokens: read, model: on, at: Date.now() };
     if (session.compactAsked === true) {
       session.compactAsked = false;
@@ -234,7 +238,9 @@ export async function startFakeOpenCode(
     emit("session.text.started", { sessionID: session.id, assistantMessageID: message, ordinal: 0 });
     emit("session.text.ended", { sessionID: session.id, assistantMessageID: message, ordinal: 0, text });
   };
+  const calledTool = new Set<string>();
   const tool = (session: FakeSession, message: string, id: string, name: string, input: Record<string, unknown>) => {
+    calledTool.add(message);
     emit("session.tool.input.started", { sessionID: session.id, assistantMessageID: message, id, name });
     emit("session.tool.called", { sessionID: session.id, assistantMessageID: message, id, input, executed: false });
   };
@@ -352,6 +358,17 @@ export async function startFakeOpenCode(
     if (/\bsend\b/.test(words)) {
       // Files named as the Chips SDK tells an agent: one from its folder, one from outside it.
       return step(session, async (message) => say(session, message, "The page is ready.\n\nMEDIA:page.html\nMEDIA:../secret.txt"));
+    }
+    const told = /\btell (\S+)$/.exec(words);
+    if (told !== null) {
+      await sleep(150);
+      return step(session, async (message) => say(session, message, `@${told[1]} over to you.`));
+    }
+    if (/\bbusy\b/.test(words)) {
+      return step(session, async (message) => {
+        for (let i = 0; i < 20 && !session.interrupted; i += 1) await sleep(20);
+        if (!session.interrupted) say(session, message, "Busy no more.");
+      });
     }
     if (/\bslow\b/.test(words)) {
       for (let i = 0; i < 30 && !session.interrupted; i += 1) {

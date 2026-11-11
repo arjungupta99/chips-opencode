@@ -536,19 +536,14 @@ describe("a turn", () => {
 });
 
 describe("what waited for an agent (Chips ADR 0294)", () => {
-  it("is one turn once it is free: each message in full, oldest first, and none said twice", async () => {
-    const { chips, opencode, lines } = await rig();
-    await chips.say("slow");
-    await until(() => opencode.prompts.length === 1);
-    await chips.say("draw the board\nnine by nine");
-    await chips.say("and name it");
-    await chips.say("no border");
-    await until(() => opencode.prompts.length === 2);
-    await until(() => count(chips, "run.completed") === 2);
+  it("is one turn for all it is sent at once: each message in full, oldest first, and none said twice", async () => {
+    const { chips, opencode, lines } = await rig({ gatherMs: 150 });
+    await Promise.all([chips.say("draw the board\nnine by nine"), chips.say("and name it"), chips.say("no border")]);
+    await sent(chips, "run.completed");
     await sleep(150);
-    assert.equal(opencode.prompts.length, 2, "one turn for the three that waited");
-    assert.equal(count(chips, "run.started"), 2);
-    const prompt = opencode.prompts[1]?.text ?? "";
+    assert.equal(opencode.prompts.length, 1, "one turn for the three");
+    assert.equal(count(chips, "run.started"), 1);
+    const prompt = opencode.prompts[0]?.text ?? "";
     assert.match(prompt, /In this space:/, "under the newest's note");
     assert.match(
       prompt,
@@ -556,29 +551,123 @@ describe("what waited for an agent (Chips ADR 0294)", () => {
     );
     assert.equal(prompt.split("draw the board").length, 2, "said once: left out of the lines since");
     assert.equal(prompt.split("and name it").length, 2);
-    assert.doesNotMatch(prompt, /slow/, "nor is what it had just answered");
     assert.ok(lines.some((line) => /takes 3 messages that waited/.test(line)));
-    const started = chips.workspace.log.filter((event) => event.type === "run.started").at(-1);
-    assert.equal(started?.payload["goal"], "no border", "named for the newest");
+    assert.equal(chips.workspace.log.find((event) => event.type === "run.started")?.payload["goal"], "no border", "named for the newest");
   });
 
-  it("is one turn for all it is sent at once, as when the bridge comes back", async () => {
-    const { chips, opencode } = await rig({ gatherMs: 150 });
-    await Promise.all([chips.say("one"), chips.say("two"), chips.say("three")]);
+  it("takes a message for it into the turn going, and says it heard it", async () => {
+    const { chips, opencode } = await rig();
+    await chips.say("slow");
+    const started = await sent(chips, "run.started");
+    await until(() => opencode.prompts.length === 1);
+    await sleep(60);
+    const more = await chips.say("and name it\nBoard");
+    const heard = await sent(chips, "message.heard");
+    assert.equal(heard.run_id, started.run_id);
+    assert.equal(heard.payload["message_id"], messageIdOf(more.id));
+    assert.equal(opencode.prompts[1]?.delivery, "steer", "read at the session's next step");
+    assert.match(opencode.prompts[1]?.text ?? "", /^[^\n]+: and name it\nBoard$/, "said as a turn's own words are");
     await sent(chips, "run.completed");
     await sleep(150);
-    assert.equal(opencode.prompts.length, 1);
-    assert.match(opencode.prompts[0]?.text ?? "", /3 messages for you waited/);
+    assert.equal(opencode.prompts.length, 2, "no turn of its own");
+    assert.equal(count(chips, "run.started"), 1);
+    const said = chips.workspace.log.filter((event) => event.type === "message.post" && event.run_id === started.run_id);
+    assert.deepEqual(
+      said.map((event) => event.payload["text"]),
+      ["Slowly done."],
+      "one answer, to both",
+    );
+  });
+
+  it("posts the answer it had said when it took the message, and its answer to the message after", async () => {
+    const { chips, opencode } = await rig();
+    await chips.say("busy");
+    const started = await sent(chips, "run.started");
+    await until(() => opencode.prompts.length === 1);
+    await sleep(60);
+    const more = await chips.say("and name it");
+    // OpenCode takes it when the model call it is on ends, which was the answer's last.
+    const heard = await sent(chips, "message.heard");
+    assert.equal(heard.payload["message_id"], messageIdOf(more.id));
+    await sent(chips, "run.completed");
+    await sleep(150);
+    assert.equal(count(chips, "run.started"), 1, "one run");
+    const said = chips.workspace.log.filter((event) => event.type === "message.post" && event.run_id === started.run_id);
+    assert.deepEqual(
+      said.map((event) => event.payload["text"]),
+      ["Busy no more.", "Here is the answer."],
+      "neither answer is lost",
+    );
+    assert.ok(heard.seq > (said[0]?.seq ?? 0), "the first answer is in the room before it is said to have heard more");
+  });
+
+  it("puts back to wait a message a stopped turn never took, and the next turn is on it", async () => {
+    const { chips, opencode } = await rig();
+    await chips.say("busy");
+    const started = await sent(chips, "run.started");
+    await until(() => opencode.prompts.length === 1);
+    await sleep(60);
+    await chips.say("and name it");
+    await until(() => opencode.prompts.length === 2);
+    await chips.asOwner({ type: "run.cancel", space_id: started.space_id, run_id: started.run_id });
+    await until(() => opencode.prompts.length === 3);
+    await until(() => count(chips, "run.completed") === 1);
+    assert.ok(opencode.withdrawn.length > 0, "taken back from OpenCode");
+    assert.equal(chips.workspace.log.find((event) => event.type === "message.heard"), undefined, "the stopped turn never had it");
+    const prompt = opencode.prompts[2];
+    assert.notEqual(prompt?.delivery, "steer");
+    assert.match(prompt?.text ?? "", /In this space:[^]*: and name it$/, "a turn of its own, under its note");
+    assert.equal(count(chips, "run.started"), 2);
+  });
+
+  it("puts back to wait a message a paused turn never took, for the turn after it", async () => {
+    const { chips, opencode } = await rig();
+    await chips.say("busy");
+    const started = await sent(chips, "run.started");
+    await until(() => opencode.prompts.length === 1);
+    await sleep(60);
+    await chips.say("and name it");
+    await until(() => opencode.prompts.length === 2);
+    await chips.asOwner({ type: "run.pause", space_id: started.space_id, run_id: started.run_id });
+    await until(() => opencode.interrupts.length > 0);
+    await sleep(60);
+    await chips.asOwner({ type: "run.resume", space_id: started.space_id, run_id: started.run_id });
+    await until(() => count(chips, "run.completed") === 2);
+    await sleep(150);
+    const texts = opencode.prompts.map((each) => each.text);
+    assert.equal(texts.length, 4, "the first words, the message as a steer, the carry-on, and the message's own turn");
+    assert.equal(texts[2], CARRY_ON, "the paused turn carries on without it");
+    assert.match(texts[3] ?? "", /In this space:[^]*: and name it$/);
+    assert.equal(chips.workspace.log.find((event) => event.type === "message.heard"), undefined);
+  });
+
+  it("leaves a reply to a message, and what comes after it, for the next turn, which says what it answers", async () => {
+    const { chips, opencode } = await rig();
+    const hello = await chips.say("hello");
+    await sent(chips, "run.completed");
+    await chips.say("slow");
+    await until(() => opencode.prompts.length === 2);
+    await sleep(60);
+    await chips.say("about that", undefined, { replyTo: messageIdOf(hello.id) });
+    await chips.say("and name it");
+    await until(() => opencode.prompts.length === 3);
+    await until(() => count(chips, "run.completed") === 3);
+    await sleep(150);
+    assert.equal(opencode.prompts.length, 3, "neither joined the turn going, and both are one turn");
+    const prompt = opencode.prompts[2]?.text ?? "";
+    assert.match(prompt, /2 messages for you waited[^]*is replying to their own message[^]*> hello\n\n[^\n]+: about that\n\n[^\n]+: and name it$/);
+    assert.doesNotMatch(prompt, /slow/, "what it had just answered is not among the lines since again");
   });
 
   it("leaves a second look a turn of its own, between what waited before it and after", async () => {
     const { chips, client, agentId, opencode } = await rig();
-    await chips.say("hello");
+    const hello = await chips.say("hello");
     await sent(chips, "run.completed");
     const said = await saidBy(client, chips.address.spaceId, agentId);
     await chips.say("slow");
     await until(() => opencode.prompts.length === 2);
-    await chips.say("before one");
+    await sleep(60);
+    await chips.say("before one", undefined, { replyTo: messageIdOf(hello.id) });
     await chips.say("before two");
     feedback(chips, { message_id: said, kind: "correction", text: "Too short" });
     await sleep(30);
@@ -601,15 +690,76 @@ describe("what waited for an agent (Chips ADR 0294)", () => {
     const { askId } = await chips.askForAgent(room, "Nova");
     await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId);
     const own = (await client.agents.list()).find((agent) => agent.agentId === agentId)?.name ?? "";
+    const hello = await chips.say(`@${own} hello`);
+    await sent(chips, "run.completed");
     await chips.say(`@${own} slow`);
-    await until(() => opencode.prompts.length === 1);
-    await chips.say(`@${own} draw the board`);
+    await until(() => opencode.prompts.length === 2);
+    await sleep(60);
+    await chips.say(`@${own} draw the board`, undefined, { replyTo: messageIdOf(hello.id) });
     await chips.say("@Nova nothing");
     const mine = (prompt: { text: string }) => /draw the board\n\nSaid in this space after/.test(prompt.text);
     await until(() => opencode.prompts.some(mine));
     const prompt = opencode.prompts.find(mine)?.text ?? "";
     assert.match(prompt, /: @\S+ draw the board\n\nSaid in this space after that message, to others:\n[^\n]+: @Nova nothing$/);
     assert.doesNotMatch(prompt, /slow/, "what it had a turn on is not among the lines since again");
+  });
+});
+
+describe("what a turn is told of its agent's place in the room", () => {
+  /** The bridge with a second agent of its own, Nova, in the room; and the turn on a message, by its last words. */
+  const withNova = async () => {
+    const chips = await startFakeChips({ capabilities: ["agents", "new_agents"] });
+    open.push(() => chips.close());
+    const made = await rig({ chips });
+    const add = async () => {
+      const { askId } = await chips.askForAgent(chips.address.spaceId, "Nova");
+      await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId);
+    };
+    const turnOn = (words: string) => made.opencode.prompts.find((prompt) => prompt.text.endsWith(`: ${words}`))?.text;
+    return { ...made, add, turnOn };
+  };
+
+  it("says what was said before the agent joined, at its first turn there and not again (Chips ADR 0088)", async () => {
+    const { chips, add, turnOn } = await withNova();
+    await chips.say("we need a board");
+    await sent(chips, "run.completed");
+    await add();
+    await chips.say("@Nova draw it");
+    await until(() => turnOn("@Nova draw it") !== undefined);
+    const first = turnOn("@Nova draw it") ?? "";
+    assert.match(first, /\n\nSaid in this space before you joined:\n(?:[^\n]+\n)*[^\n]+: we need a board\n[^\n]+: Here is the answer\.\n/);
+    assert.equal(first.split("draw it").length, 2, "its own message is not among them");
+    await until(() => count(chips, "run.completed") === 2);
+
+    await chips.say("@Nova and name it");
+    await until(() => turnOn("@Nova and name it") !== undefined);
+    assert.doesNotMatch(turnOn("@Nova and name it") ?? "", /before you joined/);
+  });
+
+  it("says first, at its next turn, that Chips held its last words from the agents they named (Chips ADR 0097)", async () => {
+    const { chips, client, agentId, opencode, lines, add, turnOn } = await withNova();
+    await add();
+    const own = (await client.agents.list()).find((agent) => agent.agentId === agentId)?.name ?? "";
+    await chips.say(`@${own} tell Nova`);
+    await until(() => opencode.prompts.length === 1);
+    // A person pauses the agents while it works: what it then says to Nova is held.
+    chips.workspace.setExchange(chips.address.spaceId, "paused", chips.workspace.owner.participantId);
+    await until(() => lines.some((line) => /^Chips held what .+ said in /.test(line)));
+    await sent(chips, "run.completed");
+    assert.equal(opencode.prompts.length, 1, "Nova never had the words");
+
+    // A person's next words let the held message go to Nova too, so the agent's own turn is found by its words.
+    await chips.say(`@${own} what now`);
+    await until(() => turnOn(`@${own} what now`) !== undefined);
+    assert.match(
+      turnOn(`@${own} what now`) ?? "",
+      /^Your last message in this space was held, so the agents it named do not have it yet: messages between the agents here are held[^.]* until a person acts\. Until then, tell the person what is done and what is blocked, rather than asking the agents again\.\n\n/,
+    );
+    await until(() => count(chips, "run.completed") >= 3);
+
+    await chips.say(`@${own} and after`);
+    await until(() => turnOn(`@${own} and after`) !== undefined);
+    assert.doesNotMatch(turnOn(`@${own} and after`) ?? "", /was held, so the agents it named/, "said once");
   });
 });
 

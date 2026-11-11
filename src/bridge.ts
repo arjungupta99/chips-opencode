@@ -47,6 +47,7 @@ import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
+  Ack,
   Agent,
   AgentContextCopy,
   AgentContextWindowCopy,
@@ -72,6 +73,7 @@ import {
 } from "@chipschat/harness";
 import {
   type AgentAsked,
+  type AgentAttached,
   type AgentFork,
   type ContextEditFrame,
   createIdGenerator,
@@ -81,6 +83,9 @@ import {
   type MessageOverheard,
   type ModelChangeFrame,
   type ProjectFacts,
+  type RoomContext,
+  renderAttachment,
+  withRole,
   type StepKind,
   type WindowChangeFrame,
   type WindowCompactFrame,
@@ -308,6 +313,37 @@ interface Room {
    * goes is sent with them among the lines since, and its turn leaves them out (Chips ADR 0294).
    */
   readonly answered: string[];
+  /** The turn going in it. */
+  turn?: Turn | undefined;
+  /**
+   * What Chips answered when it held the agent's last words here from the agents they named (Chips
+   * ADR 0097): its next turn in the room is told, first.
+   */
+  heldPost?: Pick<Ack, "held" | "exchange"> | undefined;
+}
+
+/** How many rooms' lines from before an agent joined are kept for its first turn there. */
+const SAID_BEFORE_MOST = 200;
+
+/**
+ * A message for an agent as the turn it has going is told it (Chips ADR 0294): Chips's word on the
+ * agents' talk where it sent one, then who said it and what, and its files, as a turn's own words
+ * are said.
+ */
+export function joinedWords(message: MessageNew): string {
+  const who = withRole(message.from.display_name, message.from);
+  const files = (message.attachments ?? []).map(renderAttachment);
+  return [message.exchange?.note, [`${who}: ${message.text}`, ...files].join("\n")]
+    .filter((part): part is string => part !== undefined && part !== "")
+    .join("\n\n");
+}
+
+/**
+ * Whether a model call that ended this way was the last of an answer. OpenCode's own apps read
+ * `tool-calls` and `unknown` as more to come, and anything else as the answer said.
+ */
+function saidItsAnswer(finish: string | undefined): boolean {
+  return finish !== undefined && finish !== "tool-calls" && finish !== "unknown";
 }
 
 /** How the session's work ended. */
@@ -382,6 +418,19 @@ interface Turn {
   readonly retake: (Words & { readonly item: string })[];
   /** What a person steered with while the run was paused, for Resume. */
   readonly steers: { readonly text: string; readonly mode: string }[];
+  /** The room it is in: where a message it could not take goes back to wait. */
+  readonly room: Room;
+  /**
+   * Messages for its agent that came while it worked and were given to its session as a steer
+   * (Chips ADR 0294), by inbox item, until the session takes them. One it never takes goes back to
+   * wait for the agent's next turn.
+   */
+  readonly joined: Map<string, Asked>;
+  /**
+   * How the session's last model call ended, while no other has begun: `stop` when it had said its
+   * answer, and what a message taken then starts is a second answer; `tool-calls` when it goes on.
+   */
+  finished: string | undefined;
   /** Everything heard for the turn, in order. */
   chain: Promise<void>;
   /** The agent's copy of the room's project, brought up to date as the turn began, and its name (Chips ADR 0221). */
@@ -393,6 +442,11 @@ export class Bridge {
   private readonly rooms = new Map<string, Room>();
   /** What is said in the rooms is taken in the order it came: a message, then what was overheard after it. */
   private arriving: Promise<unknown> = Promise.resolve();
+  /**
+   * What was said in a room before one of its agents joined it (Chips ADR 0088), by the agent and
+   * the room: said at the agent's first turn there, and kept no longer.
+   */
+  private readonly saidBefore = new Map<string, Pick<RoomContext, "lines">>();
   /** The turn going in each OpenCode session. */
   private readonly turns = new Map<string, Turn>();
   /** The room's rules each session holds (Chips ADR 0250): said once, and again after it compacts. */
@@ -465,6 +519,7 @@ export class Bridge {
     };
     chips.on("message.new", (message) => inOrder("a message", () => this.hear(message)));
     chips.on("message.overheard", (message) => inOrder("words overheard", async () => this.overheard(message)));
+    chips.on("agent.attached", (attached) => this.attached(attached));
     chips.on("agent.asked", (asked) => {
       this.make(asked).catch((error: unknown) => this.log(`a new agent went wrong: ${messageOf(error)}`));
     });
@@ -1109,11 +1164,110 @@ export class Bridge {
       if (agent === undefined) continue;
       const room = this.roomOf(agent, taker, spaceId);
       takes.add(room);
-      room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker, ...own, since: [] });
+      const asked: Asked = { message, speakerId: taker === harnessId ? undefined : taker, ...own, since: [] };
+      if (await this.joins(room, asked)) continue;
+      room.queue.push(asked);
       this.soon(room);
     }
     // To its other agents in the room it was said to somebody else, as what they overhear is.
     if (own.goal === undefined) this.saidToOthers(spaceId, message, takes);
+  }
+
+  /**
+   * Whether a message joined the turn its agent has going (Chips ADR 0294): given to the session as
+   * a steer, which OpenCode reads at its next step, so the answer is to it too. Not while anything
+   * waits ahead of it, nor a reply to a message, a second look or one Chips handed over, whose turn
+   * says more than its words; nor while the run is paused, stopped or not yet begun.
+   */
+  private async joins(room: Room, asked: Asked): Promise<boolean> {
+    const turn = room.turn;
+    if (turn === undefined || room.queue.length > 0 || !shares(asked) || asked.message.replying_to !== undefined) return false;
+    const going = () => turn.started && !turn.done && !turn.cancelled && !turn.halted && !turn.run.over && !turn.run.paused;
+    if (!going()) return false;
+    let item: string;
+    try {
+      item = await this.hand(turn, joinedWords(asked.message), "steer");
+    } catch {
+      return false;
+    }
+    // Ended or paused while OpenCode took the words: they are taken back, and the message waits.
+    if (!going() || room.turn !== turn) {
+      turn.given.delete(item);
+      await this.options.opencode.withdraw(turn.sessionId, item).catch(() => undefined);
+      return false;
+    }
+    turn.joined.set(item, asked);
+    this.wait(turn, item);
+    this.log(`${turn.agent.config.name} takes a message into its turn going in ${room.spaceId}`);
+    // Taken before its id was heard: it is in the turn already.
+    if (!turn.waiting.has(item)) await this.tookJoined(turn, item);
+    return true;
+  }
+
+  /**
+   * The session took a message that joined its turn (Chips ADR 0294). Where it had already said
+   * its answer, that answer is posted now, and what it says to the message is the run's next: the
+   * bridge posts a turn's last answer, and the first would be lost. The run says it heard the
+   * message, and the room shows the agent heard it while working.
+   */
+  private async tookJoined(turn: Turn, item: string): Promise<void> {
+    const asked = turn.joined.get(item);
+    if (asked === undefined) return;
+    turn.joined.delete(item);
+    if (saidItsAnswer(turn.finished)) await this.sayPart(turn);
+    keepAnswered(turn.room.answered, [asked.message]);
+    const { message_id: messageId } = asked.message;
+    await turn.run.heard(messageId).catch((error: unknown) => this.log(`couldn't say a turn heard ${messageId}: ${messageOf(error)}`));
+  }
+
+  /** The answer the session has said so far, posted in its run, with the files it names: more follows. */
+  private async sayPart(turn: Turn): Promise<void> {
+    const answer = spoken(turn.recovered ?? lastWordsOf(turn.words)).trim();
+    turn.words.length = 0;
+    turn.recovered = undefined;
+    if (answer === "" || turn.run.over) return;
+    const folder = await this.folderOf(turn.sessionId);
+    const { chips } = this.options;
+    try {
+      const post = await sendAnswer(answer, { folders: folder === undefined ? [] : [folder], upload: (input) => chips.upload(input) });
+      if (post.text === "" && post.uploadIds.length === 0) return;
+      const taken = await turn.speaker.post({ spaceId: turn.run.spaceId, runId: turn.run.id, text: post.text, uploadIds: post.uploadIds });
+      this.heldFrom(turn.room, taken);
+    } catch (error) {
+      this.log(`an answer of ${turn.agent.config.name} wasn't posted: ${messageOf(error)}`);
+    }
+  }
+
+  /** Chips held what an agent said from the agents it named (Chips ADR 0097): its next turn in the room is told. */
+  private heldFrom(room: Room, taken: Ack): void {
+    if (taken.held !== true) return;
+    room.heldPost = { held: true, ...(taken.exchange === undefined ? {} : { exchange: taken.exchange }) };
+    this.log(`Chips held what ${room.agent.config.name} said in ${room.spaceId} from the agents it named`);
+  }
+
+  /**
+   * The messages a turn was given and never took, now it is over (Chips ADR 0294): taken back from
+   * OpenCode, and waiting again, first in line, for the agent's next turn.
+   */
+  private async putBack(turn: Turn): Promise<void> {
+    const back = [...turn.joined];
+    turn.joined.clear();
+    for (const [item] of back) await this.options.opencode.withdraw(turn.sessionId, item).catch(() => undefined);
+    turn.room.queue.unshift(...back.map(([, asked]) => asked));
+  }
+
+  /**
+   * One of its agents put in a room (Chips ADR 0088): the room's last lines before it joined come
+   * with the news, and are kept for the agent's first turn there, which says them once.
+   */
+  private attached(attached: AgentAttached): void {
+    const { agent_id: agentId, space_id: spaceId, catch_up: before } = attached;
+    if (spaceId === undefined || before === undefined || before.lines.length === 0) return;
+    this.saidBefore.set(`${agentId}|${spaceId}`, before);
+    for (const oldest of this.saidBefore.keys()) {
+      if (this.saidBefore.size <= SAID_BEFORE_MOST) break;
+      this.saidBefore.delete(oldest);
+    }
   }
 
   /**
@@ -1243,6 +1397,8 @@ export class Bridge {
     };
     // A session told the room's rules isn't told them again until they change or it compacts.
     const rules = rulesFor(message, asked);
+    // What was said before the agent joined, at its first turn here; and that Chips held its last words.
+    const joined = `${speakerId ?? agent.agentId}|${spaceId}`;
     const said = (session: string) =>
       promptForAll(message, {
         ...asked,
@@ -1250,6 +1406,8 @@ export class Bridge {
         earlier,
         since,
         answered: room.answered,
+        before: this.saidBefore.get(joined),
+        heldPost: room.heldPost,
       });
     let gave: { sessionId: string; given: string; text: string } | undefined;
     try {
@@ -1262,6 +1420,8 @@ export class Bridge {
     if (gave === undefined) return;
     // Its session holds them now, however the turn goes on from here.
     keepAnswered(room.answered, [...earlier, message]);
+    this.saidBefore.delete(joined);
+    room.heldPost = undefined;
     if (earlier.length > 0) this.log(`${agent.config.name} takes ${waiting.length} messages that waited in ${spaceId} as one turn`);
     const { sessionId, given, text: first } = gave;
     let end: (end: End) => void = () => undefined;
@@ -1301,12 +1461,16 @@ export class Bridge {
       strayWork: false,
       retake: [],
       steers: [],
+      room,
+      joined: new Map(),
+      finished: undefined,
       chain: Promise.resolve(),
       project: readied === undefined ? undefined : { copy: readied.copy, name: readied.name },
     };
     const held = this.early.get(sessionId) ?? [];
     this.early.delete(sessionId);
     this.turns.set(sessionId, turn);
+    room.turn = turn;
     this.wait(turn, given);
     for (const event of held) this.heard(event);
     run.on("cancel", () => void this.cancel(turn));
@@ -1321,6 +1485,8 @@ export class Bridge {
     const last = await ended;
     await turn.chain;
     if (this.turns.get(sessionId) === turn) this.turns.delete(sessionId);
+    room.turn = undefined;
+    await this.putBack(turn);
     if (last.outcome === "succeeded") await this.finish(turn);
     else await this.ended(turn, last);
     // What OpenCode offers may have changed meanwhile, a provider set up, and the agent may have
@@ -1598,6 +1764,13 @@ export class Bridge {
       }
       turn.waiting.delete(item);
       turn.given.delete(item);
+      // A message that had joined the turn and wasn't taken waits for the agent's next turn instead.
+      const joined = turn.joined.get(item);
+      if (joined !== undefined) {
+        turn.joined.delete(item);
+        turn.room.queue.unshift(joined);
+        continue;
+      }
       turn.retake.push({ item, ...words });
     }
     if (turn.started) await this.cut(turn);
@@ -1712,6 +1885,7 @@ export class Bridge {
       // The turn's words taken while a pause holds the session, too late to take back or given as
       // the pause landed: what they start is stopped too.
       if (ours && turn.halted && turn.run.paused) await this.cut(turn);
+      if (ours) await this.tookJoined(turn, item);
       return;
     }
     // Until the session takes the turn's words, what it does is somebody else's.
@@ -1750,9 +1924,13 @@ export class Bridge {
         const model = data["model"] as ModelRef | undefined;
         const message = text(data["assistantMessageID"]);
         if (model !== undefined && message !== undefined) turn.models.set(message, model);
+        turn.finished = undefined;
         return;
       }
       case "session.step.ended":
+        turn.finished = text(data["finish"]) ?? "stop";
+        await this.counted(turn, event, true);
+        return;
       case "session.step.failed":
       case "session.compaction.ended":
         await this.counted(turn, event, true);
@@ -2055,7 +2233,7 @@ export class Bridge {
     });
     const reply = post.text;
     if (reply !== "" || post.uploadIds.length > 0) {
-      await turn.speaker.post({ spaceId: run.spaceId, runId: run.id, text: reply, uploadIds: post.uploadIds, change });
+      this.heldFrom(turn.room, await turn.speaker.post({ spaceId: run.spaceId, runId: run.id, text: reply, uploadIds: post.uploadIds, change }));
     }
     const said = post.summary;
     const summary = said === "" ? "Done." : said.length <= 2000 ? said : `${said.slice(0, 1990)}…`;
