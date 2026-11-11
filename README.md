@@ -28,6 +28,7 @@ Apache-2.0, published on npm as `@chipschat/opencode`.
 | In Chips | From OpenCode (`/api`) |
 | --- | --- |
 | A message to the agent | `POST /api/session/{id}/prompt`: the room note, what was said, the words |
+| What waited for an agent (Chips ADR 0294) | one prompt once the agent is free, not one each: under the newest message's note, each message that waited said in full, oldest first, then what was said in the room after, to others. A message Chips handed over, and a Not right?, are a prompt of their own. An idle agent starts 150 ms after the first words, so all it is sent at once, as when the bridge comes back, is one prompt |
 | The run | the session's work from `session.inbox.delivered` of those words to `session.execution.succeeded`, `failed` or `interrupted` |
 | The thinking bubble's words | `session.reasoning.ended`, `session.text.ended` on the way, a retry's `session.status` |
 | Steps, drawn by kind | `session.tool.called` / `success` / `failed`, by OpenCode's call id |

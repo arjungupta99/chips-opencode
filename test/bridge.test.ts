@@ -59,6 +59,7 @@ async function rig(
     folder?: string;
     folders?: string;
     projects?: boolean;
+    gatherMs?: number;
     /** The bridge runs OpenCode's server, and this restarts it: its connection hears restarts, as `main.ts`'s does. */
     restartServer?: (opencode: FakeOpenCode) => Promise<void>;
   } = {},
@@ -85,6 +86,7 @@ async function rig(
     saveState: () => undefined,
     healthEveryMs: 50,
     reconnectMs: 50,
+    gatherMs: options.gatherMs ?? 10,
     log: (line) => lines.push(line),
     // Nobody's own OpenCode files are read: a home of its own, with nothing in it.
     places: { home: NO_HOME, config: join(NO_HOME, ".config", "opencode") },
@@ -530,6 +532,84 @@ describe("a turn", () => {
     const words = await reply(chips, started.run_id);
     assert.equal(words.payload["text"], "Here is the answer.");
     await sent(chips, "run.completed");
+  });
+});
+
+describe("what waited for an agent (Chips ADR 0294)", () => {
+  it("is one turn once it is free: each message in full, oldest first, and none said twice", async () => {
+    const { chips, opencode, lines } = await rig();
+    await chips.say("slow");
+    await until(() => opencode.prompts.length === 1);
+    await chips.say("draw the board\nnine by nine");
+    await chips.say("and name it");
+    await chips.say("no border");
+    await until(() => opencode.prompts.length === 2);
+    await until(() => count(chips, "run.completed") === 2);
+    await sleep(150);
+    assert.equal(opencode.prompts.length, 2, "one turn for the three that waited");
+    assert.equal(count(chips, "run.started"), 2);
+    const prompt = opencode.prompts[1]?.text ?? "";
+    assert.match(prompt, /In this space:/, "under the newest's note");
+    assert.match(
+      prompt,
+      /\n\n3 messages for you waited while you were working or away\. They follow, oldest first\. Answer them together in one reply, and where a later one changes or settles an earlier one, go by the later\.\n\n[^\n]+: draw the board\nnine by nine\n\n[^\n]+: and name it\n\n[^\n]+: no border$/,
+    );
+    assert.equal(prompt.split("draw the board").length, 2, "said once: left out of the lines since");
+    assert.equal(prompt.split("and name it").length, 2);
+    assert.doesNotMatch(prompt, /slow/, "nor is what it had just answered");
+    assert.ok(lines.some((line) => /takes 3 messages that waited/.test(line)));
+    const started = chips.workspace.log.filter((event) => event.type === "run.started").at(-1);
+    assert.equal(started?.payload["goal"], "no border", "named for the newest");
+  });
+
+  it("is one turn for all it is sent at once, as when the bridge comes back", async () => {
+    const { chips, opencode } = await rig({ gatherMs: 150 });
+    await Promise.all([chips.say("one"), chips.say("two"), chips.say("three")]);
+    await sent(chips, "run.completed");
+    await sleep(150);
+    assert.equal(opencode.prompts.length, 1);
+    assert.match(opencode.prompts[0]?.text ?? "", /3 messages for you waited/);
+  });
+
+  it("leaves a second look a turn of its own, between what waited before it and after", async () => {
+    const { chips, client, agentId, opencode } = await rig();
+    await chips.say("hello");
+    await sent(chips, "run.completed");
+    const said = await saidBy(client, chips.address.spaceId, agentId);
+    await chips.say("slow");
+    await until(() => opencode.prompts.length === 2);
+    await chips.say("before one");
+    await chips.say("before two");
+    feedback(chips, { message_id: said, kind: "correction", text: "Too short" });
+    await sleep(30);
+    await chips.say("after");
+    await until(() => opencode.prompts.length === 5);
+    await sleep(150);
+    const [waited, again, after] = opencode.prompts.slice(2).map((each) => each.text);
+    assert.match(waited ?? "", /2 messages for you waited[^]*: before one\n\n[^\n]+: before two$/);
+    assert.match(again ?? "", /wasn't right/);
+    assert.doesNotMatch(again ?? "", /messages for you waited/);
+    assert.match(after ?? "", /: after$/);
+    assert.doesNotMatch(after ?? "", /messages for you waited/);
+  });
+
+  it("tells the turn what was said to another of its agents after the message arrived", async () => {
+    const chips = await startFakeChips({ capabilities: ["agents", "new_agents"] });
+    open.push(() => chips.close());
+    const { client, agentId, opencode } = await rig({ chips });
+    const room = chips.address.spaceId;
+    const { askId } = await chips.askForAgent(room, "Nova");
+    await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId);
+    const own = (await client.agents.list()).find((agent) => agent.agentId === agentId)?.name ?? "";
+    await chips.say(`@${own} slow`);
+    await until(() => opencode.prompts.length === 1);
+    await chips.say(`@${own} draw the board`);
+    await chips.say("@Nova nothing");
+    const mine = (prompt: { text: string }) => /draw the board\n\nSaid in this space after/.test(prompt.text);
+    await until(() => opencode.prompts.some(mine));
+    const prompt = opencode.prompts.find(mine)?.text ?? "";
+    assert.match(prompt, /: @\S+ draw the board\n\nSaid in this space after that message, to others:\n[^\n]+: @Nova nothing$/);
+    assert.doesNotMatch(prompt, /slow/, "what it had a turn on is not among the lines since again");
   });
 });
 
