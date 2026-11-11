@@ -65,6 +65,7 @@ import type {
 import {
   firstTurnOf,
   heldNote,
+  promptFor,
   pushedInWords,
   Refuse,
   rulesFor,
@@ -91,7 +92,7 @@ import {
   type WindowCompactFrame,
 } from "@chipschat/protocol";
 import { before, ContextFiles, namedFiles, type Places, placesOf, READS_NAMED, type Reading, within } from "./context.js";
-import { folds, GATHER_MS, type Heard, keepAnswered, keepHeard, promptForAll } from "./fold.js";
+import { folds, GATHER_MS, type Heard, keepAnswered, keepHeard } from "./fold.js";
 import { type Fallback, type ModelPick, modelCopy, pickOf, refOf, sameModel, writtenOf } from "./models.js";
 import { compactedTo, type KeptWindow, type Tokens, usedOf, windowCopy } from "./windows.js";
 import {
@@ -1400,7 +1401,7 @@ export class Bridge {
     // What was said before the agent joined, at its first turn here; and that Chips held its last words.
     const joined = `${speakerId ?? agent.agentId}|${spaceId}`;
     const said = (session: string) =>
-      promptForAll(message, {
+      promptFor(message, {
         ...asked,
         rulesHeld: this.rules.holds(session, rules),
         earlier,
