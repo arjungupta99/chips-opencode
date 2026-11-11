@@ -14,6 +14,7 @@ import { createIdGenerator, messageIdOf } from "@chipschat/protocol";
 import {
   Bridge,
   type BridgeState,
+  CARRY_ON,
   cardOf,
   decisionOf,
   forkName,
@@ -116,6 +117,30 @@ const reply = (chips: FakeChips, runId: string | null | undefined) =>
   sent(chips, "message.post", (event) => event.run_id === runId);
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** A status of the session's own, not the one each run starts with to say it can pause (Chips ADR 0293). */
+const thought = (event: StoredEvent) => event.payload["verb_phrase"] !== "Thinking…";
+
+interface Sent {
+  readonly type: string;
+  readonly envelope: Readonly<Record<string, unknown>>;
+  readonly payload: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * What goes by the connection's own `send` from now on, with the envelope as the bridge gave it:
+ * the kit's server drops a field the protocol it was built with doesn't declare (ADR 0162), so its
+ * log can't show one.
+ */
+function sendsOf(client: Chips): Sent[] {
+  const seen: Sent[] = [];
+  const send = client.send.bind(client);
+  client.send = (type, envelope, payload, key) => {
+    seen.push({ type, envelope, payload });
+    return send(type, envelope, payload, key);
+  };
+  return seen;
+}
 
 /**
  * A person's feedback on a message, as Chips hands it to the harness whose message it is, with who
@@ -376,7 +401,7 @@ describe("a turn", () => {
     await chips.say("summarise the notes");
     const started = await sent(chips, "run.started");
     assert.equal(started.actor.id, agentId, "the Main agent took it");
-    const status = await sent(chips, "run.status");
+    const status = await sent(chips, "run.status", thought);
     assert.equal(status.payload["verb_phrase"], "Let me look at the notes.");
     const opened = await sent(chips, "step.log", (event) => event.payload["status"] === "started");
     assert.deepEqual(
@@ -634,6 +659,252 @@ describe("what a person does to it", () => {
     assert.equal(opencode.interrupts.length, 1);
     assert.equal(opencode.prompts[1]?.delivery, undefined);
     assert.match(opencode.prompts[1]?.text ?? "", /adds: Just summarise\.$/);
+  });
+});
+
+// No bridge heard run.pause: the bubble hid, and the agent kept working out of sight (Chips ADR 0293).
+describe("a person's Pause (Chips ADR 0293)", () => {
+  const PAYLOAD = { phase: "thinking", verb_phrase: "Thinking…", pausable: true };
+  const pause = (chips: FakeChips, run: StoredEvent) => chips.asOwner({ type: "run.pause", space_id: run.space_id, run_id: run.run_id });
+  const resume = (chips: FakeChips, run: StoredEvent) => chips.asOwner({ type: "run.resume", space_id: run.space_id, run_id: run.run_id });
+  const stop = (chips: FakeChips, run: StoredEvent) => chips.asOwner({ type: "run.cancel", space_id: run.space_id, run_id: run.run_id });
+  /**
+   * A run stopped once the test is over, should it have left it paused: the SDK's wait for a resume
+   * would keep the process alive, and a test that failed would hang the suite. One ended already is refused.
+   */
+  const endsAfter = (chips: FakeChips, run: StoredEvent) =>
+    open.push(async () => {
+      await Promise.resolve(stop(chips, run)).catch(() => undefined);
+      await sleep(20);
+    });
+  /**
+   * The kit's server is from before a pause was a state of its own: it won't pause a run that waits
+   * on an ask, which Chips now does, nor resume it once the ask is answered. These go in past its door.
+   */
+  const asChipsNow = (chips: FakeChips, type: "run.pause" | "run.resume", run: StoredEvent) =>
+    appended(chips, { type, space_id: run.space_id, run_id: run.run_id, by: chips.workspace.owner.participantId });
+  /** What the run said in the room, how it ended, and whether it failed. */
+  const after = (chips: FakeChips, run: StoredEvent) =>
+    ["message.post", "run.completed", "run.failed"].map(
+      (type) => chips.workspace.log.filter((event) => event.type === type && event.run_id === run.run_id).length,
+    );
+  /** A long one under way: its first part said, its session at work on the rest. */
+  async function longOne(): Promise<Rig & { started: StoredEvent }> {
+    const made = await rig();
+    await made.chips.say("a long one");
+    const started = await sent(made.chips, "run.started");
+    endsAfter(made.chips, started);
+    await sent(made.chips, "run.status", (event) => event.run_id === started.run_id && event.payload["verb_phrase"] === "Half of it.");
+    return { ...made, started };
+  }
+  /** Paused and resumed, `times` times over, each pause stopping the session at work. */
+  async function pausedAndResumed({ chips, opencode, started }: Rig & { started: StoredEvent }, times: number): Promise<void> {
+    for (let time = 1; time <= times; time += 1) {
+      await pause(chips, started);
+      await until(() => opencode.interrupts.length === time);
+      await resume(chips, started);
+      await until(() => opencode.prompts.length === time + 1);
+      // Its session takes the words and carries on.
+      await sleep(40);
+    }
+  }
+
+  it("says each run can pause, once, as it starts, in the run's envelope with the agent taking it", async () => {
+    const { chips, client, agentId } = await rig();
+    const said = sendsOf(client);
+    await chips.say("one");
+    const first = await sent(chips, "run.completed");
+    await chips.say("two");
+    const second = await sent(chips, "run.completed", (event) => event.run_id !== first.run_id);
+    assert.deepEqual(
+      said.filter((each) => each.payload["pausable"] === true),
+      [first, second].map((run) => ({
+        type: "run.status",
+        envelope: { space_id: chips.address.spaceId, run_id: run.run_id, actor: { kind: "agent", id: agentId } },
+        payload: PAYLOAD,
+      })),
+    );
+    // The run's first status, from the agent; this server drops the field it doesn't know.
+    const status = await sent(chips, "run.status", (event) => event.run_id === first.run_id);
+    assert.deepEqual([status.actor.id, status.payload["phase"], status.payload["verb_phrase"]], [agentId, "thinking", "Thinking…"]);
+  });
+
+  it("says it with no actor for a run the harness takes as itself", async () => {
+    const { chips, client, agentId } = await rig();
+    const said = sendsOf(client);
+    // A Not right? on a message the room doesn't have is for nobody, and the harness takes it.
+    feedback(chips, { message_id: createIdGenerator().next("message"), kind: "correction", text: "Wrong facts." });
+    const started = await sent(chips, "run.started");
+    await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+    assert.deepEqual(
+      said.filter((each) => each.payload["pausable"] === true),
+      [{ type: "run.status", envelope: { space_id: chips.address.spaceId, run_id: started.run_id }, payload: PAYLOAD }],
+    );
+    // Chips reads it as the room's agent's, as it reads the run.
+    assert.equal((await sent(chips, "run.status", (event) => event.run_id === started.run_id)).actor.id, agentId);
+  });
+
+  it("stops the session where it is, says nothing until Resume, then carries on in the same session to one reply", async () => {
+    const { chips, opencode, started } = await longOne();
+    await pause(chips, started);
+    await until(() => opencode.interrupts.length === 1);
+    await sleep(200);
+    assert.deepEqual(after(chips, started), [0, 0, 0], "nothing said, and no end");
+    assert.equal(opencode.prompts.length, 1, "nothing more given");
+    const sessionId = opencode.prompts[0]?.sessionId ?? "";
+    assert.deepEqual(opencode.interrupts, [sessionId]);
+    await resume(chips, started);
+    assert.equal((await reply(chips, started.run_id)).payload["text"], "All of it.", "its answer, not the part before the pause");
+    await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+    assert.deepEqual(after(chips, started), [1, 1, 0]);
+    assert.deepEqual(opencode.prompts.slice(1), [{ sessionId, text: CARRY_ON, delivery: undefined }]);
+    assert.equal(opencode.created.length, 1, "the same session");
+    assert.deepEqual(opencode.historyOf(sessionId).slice(-3), ["Half of it.", CARRY_ON, "All of it."], "it remembers where it stopped");
+    assert.deepEqual(opencode.interrupts, [sessionId]);
+  });
+
+  it("gives what was steered while paused after the words to carry on", async () => {
+    const { chips, opencode, started } = await longOne();
+    await pause(chips, started);
+    await until(() => opencode.interrupts.length === 1);
+    await chips.asOwner({ type: "run.steer", space_id: started.space_id, run_id: started.run_id, text: "Shorter, please.", mode: "steer" });
+    await sleep(150);
+    assert.equal(opencode.prompts.length, 1, "held for Resume");
+    await resume(chips, started);
+    await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+    assert.equal(opencode.prompts.length, 2);
+    const words = opencode.prompts[1]?.text ?? "";
+    assert.ok(words.startsWith(`${CARRY_ON}\n\n`), words);
+    assert.match(words.slice(CARRY_ON.length + 2), /^[^\n]+ adds: Shorter, please\.$/);
+    assert.equal(opencode.prompts[1]?.delivery, undefined);
+  });
+
+  it("ends quietly when stopped while paused, and the room goes on", async () => {
+    const { chips, opencode, started } = await longOne();
+    await pause(chips, started);
+    await until(() => opencode.interrupts.length === 1);
+    await stop(chips, started);
+    await sleep(200);
+    assert.deepEqual(after(chips, started), [0, 0, 0], "nothing more said");
+    assert.equal(opencode.prompts.length, 1, "not told to carry on");
+    await chips.say("next");
+    const next = await sent(chips, "run.completed", (event) => event.run_id !== started.run_id);
+    assert.equal((await reply(chips, next.run_id)).payload["text"], "Here is the answer.");
+  });
+
+  it("lets its session compact while paused, which is neither stopped nor the turn's end", async () => {
+    const { chips, bridge, opencode, agentId, lines, started } = await longOne();
+    await pause(chips, started);
+    await until(() => opencode.interrupts.length === 1);
+    // Idle once the interrupt has stopped it, so OpenCode compacts it at once.
+    await sleep(100);
+    const ask = { frame: "context_window.compact", agent_id: agentId, change_id: "chg_paused" };
+    await bridge.windowCompact(ask as unknown as Parameters<Bridge["windowCompact"]>[0]);
+    await until(() => lines.some((line) => line.includes("compacted (asked)")));
+    await sleep(100);
+    assert.deepEqual(after(chips, started), [0, 0, 0], "no end, and the half-done part not said");
+    assert.equal(opencode.interrupts.length, 1, "the compaction goes on");
+    await resume(chips, started);
+    assert.equal((await reply(chips, started.run_id)).payload["text"], "All of it.");
+    assert.equal(opencode.prompts[1]?.text, CARRY_ON);
+  });
+
+  it("holds a turn's words when paused before they are given, and gives them as they were on Resume", async () => {
+    const { chips, opencode } = await rig();
+    let release = () => {};
+    opencode.making = new Promise((resolve) => (release = resolve));
+    await chips.say("summarise the notes");
+    const started = await sent(chips, "run.started");
+    endsAfter(chips, started);
+    await pause(chips, started);
+    // The pause reaches the bridge while its session is being made.
+    await sleep(100);
+    opencode.making = undefined;
+    release();
+    await until(() => opencode.created.length === 1);
+    await sleep(150);
+    assert.equal(opencode.prompts.length, 0, "the words wait");
+    await resume(chips, started);
+    assert.equal((await reply(chips, started.run_id)).payload["text"], "Here is the answer.");
+    assert.equal(opencode.prompts.length, 1);
+    assert.match(opencode.prompts[0]?.text ?? "", /summarise the notes$/, "its own words, with nothing to carry on from");
+    assert.deepEqual(opencode.interrupts, [], "nothing to stop");
+  });
+
+  it("ends quietly when stopped while paused before its words are given", async () => {
+    const { chips, opencode } = await rig();
+    let release = () => {};
+    opencode.making = new Promise((resolve) => (release = resolve));
+    await chips.say("summarise the notes");
+    const started = await sent(chips, "run.started");
+    endsAfter(chips, started);
+    await pause(chips, started);
+    await sleep(100);
+    opencode.making = undefined;
+    release();
+    await until(() => opencode.created.length === 1);
+    await stop(chips, started);
+    await sleep(200);
+    assert.equal(opencode.prompts.length, 0, "never given");
+    assert.deepEqual(after(chips, started), [0, 0, 0]);
+  });
+
+  it("interrupts nothing while the agent waits on an approval, and gives OpenCode one given meanwhile on Resume", async () => {
+    const { chips, opencode } = await rig();
+    await chips.say("ask first");
+    const asked = await sent(chips, "approval.request");
+    endsAfter(chips, asked);
+    asChipsNow(chips, "run.pause", asked);
+    await sleep(150);
+    await chips.decide(String(asked.payload["approval_id"]), "approved");
+    await sleep(150);
+    assert.deepEqual(opencode.interrupts, [], "nothing stopped");
+    assert.deepEqual(opencode.permissionReplies, [], "the answer waits");
+    asChipsNow(chips, "run.resume", asked);
+    assert.equal((await reply(chips, asked.run_id)).payload["text"], "Given: once");
+    assert.deepEqual(opencode.permissionReplies, [{ requestId: "per_1", decision: "once", message: undefined }]);
+    assert.equal(opencode.prompts.length, 1, "nothing was stopped, so nothing to carry on");
+  });
+
+  it("interrupts nothing while the agent waits on a question, and gives OpenCode the answer on Resume", async () => {
+    const { chips, opencode } = await rig();
+    await chips.say("a question for you");
+    const asked = await sent(chips, "question.ask");
+    endsAfter(chips, asked);
+    asChipsNow(chips, "run.pause", asked);
+    await sleep(150);
+    await chips.answer(String(asked.payload["ask_id"]), { q0: ["Blue"] });
+    await sleep(150);
+    assert.deepEqual(opencode.interrupts, []);
+    assert.deepEqual(opencode.formReplies, [], "the answer waits");
+    asChipsNow(chips, "run.resume", asked);
+    assert.equal((await reply(chips, asked.run_id)).payload["text"], "Chose: Blue");
+    assert.deepEqual(opencode.formReplies, [{ formId: "frm_1", answer: { q0: "Blue" } }]);
+    assert.equal(opencode.prompts.length, 1);
+  });
+
+  it("holds and carries on as often as it is paused and resumed, to one reply", async () => {
+    const made = await longOne();
+    const { chips, opencode, started } = made;
+    await pausedAndResumed(made, 2);
+    assert.equal((await reply(chips, started.run_id)).payload["text"], "All of it.");
+    await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+    assert.deepEqual(after(chips, started), [1, 1, 0]);
+    assert.deepEqual(
+      opencode.prompts.slice(1).map((each) => each.text),
+      [CARRY_ON, CARRY_ON],
+    );
+    assert.equal(opencode.interrupts.length, 2);
+  });
+
+  it("ends quietly when stopped after being paused and resumed over and again", async () => {
+    const made = await longOne();
+    const { chips, opencode, started } = made;
+    await pausedAndResumed(made, 2);
+    await stop(chips, started);
+    await sleep(500);
+    assert.deepEqual(after(chips, started), [0, 0, 0]);
+    assert.equal(opencode.prompts.length, 3);
   });
 });
 
@@ -923,7 +1194,7 @@ describe("a person's Restart (Chips ADR 0094)", () => {
     await chips.say("slow");
     const started = await sent(chips, "run.started");
     // Under way in OpenCode, the words taken.
-    await sent(chips, "run.status", (event) => event.run_id === started.run_id);
+    await sent(chips, "run.status", (event) => event.run_id === started.run_id && thought(event));
     assert.equal(chips.askToRestart(), 1);
     const failed = await sent(chips, "run.failed", (event) => event.run_id === started.run_id);
     assert.equal(failed.payload["error"], "OpenCode: OpenCode didn't come back after a restart");

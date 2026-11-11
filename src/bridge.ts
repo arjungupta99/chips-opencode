@@ -21,6 +21,8 @@
  * - At the end come its last words in the room.
  * - Stop interrupts the session. A steer, a follow-up and an interrupt are OpenCode's own `steer`,
  *   `queue`, and interrupt-then-prompt.
+ * - Pause interrupts it too, but keeps the run, and Resume tells the same session to carry on
+ *   (Chips ADR 0293). Each run says it can, once, as it starts.
  *
  * A person's Not right? on an agent's message (Chips ADR 0200) is a run too: the agent who said
  * it looks again, in its session for the room, and its answer goes in the reply's place.
@@ -87,6 +89,7 @@ import { before, ContextFiles, namedFiles, type Places, placesOf, READS_NAMED, t
 import { type Fallback, type ModelPick, modelCopy, pickOf, refOf, sameModel, writtenOf } from "./models.js";
 import { compactedTo, type KeptWindow, type Tokens, usedOf, windowCopy } from "./windows.js";
 import {
+  type Delivery,
   type FormAnswer,
   type ModelRef,
   modelRefOf,
@@ -205,6 +208,13 @@ const ids = createIdGenerator();
 const QUIET_MS = 1500;
 /** Held in a turn's waiting words while an interrupt stops the session, so its end isn't the turn's. */
 const INTERRUPTING = "interrupting";
+/**
+ * Held in a turn's waiting words while a pause has stopped the session (Chips ADR 0293), so the end
+ * of what it was doing isn't the turn's: Resume gives it more.
+ */
+const PAUSED = "paused";
+/** What a session a pause stopped partway is told on Resume (Chips ADR 0293). */
+export const CARRY_ON = "You were paused partway through this. Carry on from where you stopped. Nothing you wrote before the pause reached the room, so write your whole reply.";
 /** The most a harness's trouble says (Chips ADR 0083). */
 const TROUBLE_CHARS = 200;
 /** How many feedbacks answered are remembered, so one heard again is nothing: a replay comes soon. */
@@ -271,6 +281,12 @@ interface End {
   readonly why?: string | undefined;
 }
 
+/** Words given to a session, and how. */
+interface Words {
+  readonly text: string;
+  readonly delivery?: Delivery | undefined;
+}
+
 /** A card for something OpenCode asked, and whether the answer came from here. */
 interface Pending {
   readonly approvalId: string;
@@ -295,6 +311,10 @@ interface Turn {
   readonly taken: Set<string>;
   /** Whether the session has taken any of the turn's words: until then its work is somebody else's. */
   started: boolean;
+  /** The words of inbox items given and not yet taken, so a pause can take them back and give them again. */
+  readonly given: Map<string, Words>;
+  /** The turn has ended, or is ending: its session is given nothing more for it. */
+  done: boolean;
   readonly end: (end: End) => void;
   /** The words of each answer, by its message, in order. */
   readonly words: { readonly message: string; readonly text: string }[];
@@ -310,6 +330,23 @@ interface Turn {
   readonly approvals: Map<string, Pending>;
   /** Approvals a person allowed, by the tool call they were for: its end says how it went. */
   readonly allowed: Map<string, string>;
+  /** Questions asked in Chips whose answers OpenCode doesn't have yet. */
+  questions: number;
+  /** A person's pause is being held (Chips ADR 0293): one hold at a time, however often it is heard. */
+  holding: boolean;
+  /** The pause has stopped the session's work, and `PAUSED` is in `waiting` until Resume. */
+  halted: boolean;
+  /** It was stopped partway through the turn's words, so Resume tells it to carry on. */
+  cutShort: boolean;
+  /**
+   * Since the pause stopped it, the session started work that isn't the turn's: a compaction, or
+   * words from OpenCode's own apps. Its end is no end of the turn's.
+   */
+  strayWork: boolean;
+  /** Words the pause took back from the session's inbox before it took them, to give again on Resume. */
+  readonly retake: (Words & { readonly item: string })[];
+  /** What a person steered with while the run was paused, for Resume. */
+  readonly steers: { readonly text: string; readonly mode: string }[];
   /** Everything heard for the turn, in order. */
   chain: Promise<void>;
   /** The agent's copy of the room's project, brought up to date as the turn began, and its name (Chips ADR 0221). */
@@ -1111,6 +1148,7 @@ export class Bridge {
     const { agent, spaceId } = room;
     const speaker = speakerId === undefined ? this.options.chips : this.options.chips.as(speakerId);
     const run = await speaker.runs.start({ spaceId, goal: goal ?? goalOf(message, agent.config.name) });
+    void this.sayPausable(run, speakerId);
     const readied = await this.projectFor(room, speakerId ?? agent.agentId);
     const asked = {
       ...(speakerId === undefined ? {} : { taker: speakerId }),
@@ -1122,14 +1160,16 @@ export class Bridge {
     const rules = rulesFor(message, asked);
     const said = (session: string) =>
       promptFor(message, { ...asked, rulesHeld: this.rules.holds(session, rules) });
-    let sessionId: string;
-    let given: string;
+    let gave: { sessionId: string; given: string; text: string } | undefined;
     try {
-      ({ sessionId, given } = await this.give(room, said, rules));
+      gave = await this.give(room, said, rules, run);
     } catch (error) {
       await this.failed(run, `${agent.config.name} couldn't reach OpenCode: ${messageOf(error)}`, true);
       return;
     }
+    // Stopped before its words were given, paused or not: Chips has ended the run, and nothing more is said.
+    if (gave === undefined) return;
+    const { sessionId, given, text: first } = gave;
     let end: (end: End) => void = () => undefined;
     const ended = new Promise<End>((resolve) => {
       end = resolve;
@@ -1146,7 +1186,12 @@ export class Bridge {
       waiting: new Set(),
       taken: new Set(),
       started: false,
-      end,
+      given: new Map([[given, { text: first }]]),
+      done: false,
+      end: (how) => {
+        turn.done = true;
+        end(how);
+      },
       words: [],
       recovered: undefined,
       saidAt: 0,
@@ -1155,6 +1200,13 @@ export class Bridge {
       models: new Map(),
       approvals: new Map(),
       allowed: new Map(),
+      questions: 0,
+      holding: false,
+      halted: false,
+      cutShort: false,
+      strayWork: false,
+      retake: [],
+      steers: [],
       chain: Promise.resolve(),
       project: readied === undefined ? undefined : { copy: readied.copy, name: readied.name },
     };
@@ -1168,6 +1220,10 @@ export class Bridge {
       const words = `${steer.from?.display_name ?? "The person"} adds: ${steer.text}`;
       void this.steered(turn, words, steer.mode);
     });
+    run.on("pause", () => void this.hold(turn));
+    // What a person did while the words were on their way, before the turn heard it.
+    if (run.over) void this.cancel(turn);
+    else if (run.paused) void this.hold(turn);
     const last = await ended;
     await turn.chain;
     if (this.turns.get(sessionId) === turn) this.turns.delete(sessionId);
@@ -1180,12 +1236,16 @@ export class Bridge {
     await this.turnHeld(turn);
   }
 
-  /** The words into the room's session: the one it had, or a new one when OpenCode no longer has it. */
+  /**
+   * The words into the room's session: the one it had, or a new one when OpenCode no longer has it.
+   * Nothing where the run was stopped before they could be given.
+   */
   private async give(
     { id, who, agent, spaceId }: Room,
     said: (sessionId: string) => string,
     rules: string,
-  ): Promise<{ sessionId: string; given: string }> {
+    run: Run,
+  ): Promise<{ sessionId: string; given: string; text: string } | undefined> {
     const { opencode, state, saveState } = this.options;
     let kept = state.sessions[id];
     // A copy's session is saved once Chips has it: its first words wait, not to start a blank one.
@@ -1196,7 +1256,9 @@ export class Bridge {
     if (kept !== undefined) {
       try {
         await this.modelled(kept, { who, agent });
-        return { sessionId: kept, given: await this.prompted(kept, said(kept), rules) };
+        if (!(await this.running(run))) return undefined;
+        const text = said(kept);
+        return { sessionId: kept, given: await this.prompted(kept, text, rules), text };
       } catch (error) {
         if (!(error instanceof OpenCodeError && error.tag === "SessionNotFoundError")) throw error;
         this.log(`${agent.config.name}'s session for ${spaceId} is gone from OpenCode: a new one`);
@@ -1212,7 +1274,18 @@ export class Bridge {
     });
     state.sessions[id] = made;
     saveState(state);
-    return { sessionId: made, given: await this.prompted(made, said(made), rules) };
+    if (!(await this.running(run))) return undefined;
+    const text = said(made);
+    return { sessionId: made, given: await this.prompted(made, text, rules), text };
+  }
+
+  /**
+   * Whether a run goes on: at once where it isn't paused, else once a person resumes it, which
+   * holds a turn's next words until then (Chips ADR 0293). Not where it was stopped meanwhile.
+   */
+  private async running(run: Run): Promise<boolean> {
+    await run.whenRunning();
+    return !run.over;
   }
 
   /**
@@ -1308,8 +1381,19 @@ export class Bridge {
 
   /** An inbox item of the turn's: waited for, unless the session took it already. */
   private wait(turn: Turn, item: string): void {
-    if (turn.taken.delete(item)) turn.started = true;
-    else turn.waiting.add(item);
+    if (turn.taken.delete(item)) {
+      turn.started = true;
+      turn.given.delete(item);
+      // Taken before the bridge heard its id, as a pause landed: what it starts is stopped too.
+      if (turn.halted && turn.run.paused) void this.cut(turn);
+    } else turn.waiting.add(item);
+  }
+
+  /** Words given to a turn's session, kept by their inbox item until it takes them. */
+  private async hand(turn: Turn, text: string, delivery?: Delivery): Promise<string> {
+    const item = await this.options.opencode.prompt(turn.sessionId, text, delivery);
+    turn.given.set(item, { text, delivery });
+    return item;
   }
 
   /** Stop: whatever of the turn's words OpenCode hasn't taken is withdrawn, and the session interrupted. */
@@ -1317,7 +1401,7 @@ export class Bridge {
     turn.cancelled = true;
     const { opencode } = this.options;
     for (const item of turn.waiting) {
-      if (item !== INTERRUPTING) await opencode.withdraw(turn.sessionId, item).catch(() => undefined);
+      if (!marked(item)) await opencode.withdraw(turn.sessionId, item).catch(() => undefined);
     }
     turn.waiting.clear();
     await opencode.interrupt(turn.sessionId).catch(() => undefined);
@@ -1327,22 +1411,149 @@ export class Bridge {
   /**
    * A person's words for a run that is going. A steer is read at the session's next step, a
    * follow-up when what it is doing ends, and an interrupt stops it and starts it on the words.
+   * Words for a paused run wait for Resume (Chips ADR 0293).
    */
   private async steered(turn: Turn, text: string, mode: string): Promise<void> {
+    if (turn.run.paused || turn.halted) {
+      turn.steers.push({ text, mode });
+      return;
+    }
     const { opencode } = this.options;
     try {
       if (mode === "interrupt") {
         turn.waiting.add(INTERRUPTING);
         await opencode.interrupt(turn.sessionId).catch(() => undefined);
-        this.wait(turn, await opencode.prompt(turn.sessionId, text));
+        // Paused meanwhile: the pause has the session stopped, and Resume gives it these words.
+        if (turn.run.paused || turn.halted) turn.steers.push({ text, mode });
+        else this.wait(turn, await this.hand(turn, text));
         turn.waiting.delete(INTERRUPTING);
         return;
       }
-      this.wait(turn, await opencode.prompt(turn.sessionId, text, mode === "steer" ? "steer" : "queue"));
+      this.wait(turn, await this.hand(turn, text, mode === "steer" ? "steer" : "queue"));
     } catch (error) {
       turn.waiting.delete(INTERRUPTING);
       this.log(`OpenCode didn't take a person's words mid-run: ${messageOf(error)}`);
     }
+  }
+
+  // ------------------------------------------------------------------ a person's Pause (Chips ADR 0293)
+
+  /**
+   * That the run holds where it is when a person pauses it, said once as it starts, on a status no
+   * client draws as a thought. The SDK this bridge is built on (1.0.4) has no word for it in
+   * `run.status()`, so it goes by the connection's own `send`, in the envelope the run's own events
+   * carry. A server from before it drops the field; a send that fails is only logged.
+   */
+  private async sayPausable(run: Run, speakerId: string | undefined): Promise<void> {
+    try {
+      await this.options.chips.send(
+        "run.status",
+        {
+          space_id: run.spaceId,
+          run_id: run.id,
+          ...(speakerId === undefined ? {} : { actor: { kind: "agent", id: speakerId } }),
+        },
+        { phase: "thinking", verb_phrase: "Thinking…", pausable: true },
+        `opencode-pausable:${run.id}`,
+      );
+    } catch (error) {
+      this.log(`${run.id} didn't say it can pause: ${messageOf(error)}`);
+    }
+  }
+
+  /**
+   * A person's Pause: the session's work stopped where it is, the session kept, nothing said for
+   * the half-done part and no end sent; on Resume the session is told to carry on, and the run goes
+   * on to its end as any other. Paused again meanwhile, it is the same hold, and the loop stops the
+   * session again after a Resume's words; a Stop ends the run as Stop ends any.
+   */
+  private async hold(turn: Turn): Promise<void> {
+    if (turn.holding) return;
+    turn.holding = true;
+    try {
+      while (turn.run.paused && !turn.run.over && !turn.done) {
+        await this.halt(turn);
+        await turn.run.whenRunning();
+        if (turn.run.over || turn.done || turn.cancelled) return;
+        await this.carryOn(turn);
+      }
+    } finally {
+      turn.holding = false;
+    }
+  }
+
+  /**
+   * The session's work stopped for a pause, as Stop stops it, but kept: the turn's words it hasn't
+   * taken are taken back to give again, and what it is doing on them is interrupted. Nothing while
+   * it waits on a person's answer, which holds it already: the answer waits for Resume instead.
+   */
+  private async halt(turn: Turn): Promise<void> {
+    if (turn.halted || turn.done || this.asking(turn)) return;
+    turn.halted = true;
+    turn.strayWork = false;
+    turn.waiting.add(PAUSED);
+    const { opencode } = this.options;
+    for (const item of [...turn.waiting]) {
+      const words = turn.given.get(item);
+      if (marked(item) || words === undefined) continue;
+      try {
+        await opencode.withdraw(turn.sessionId, item);
+      } catch {
+        // Taken meanwhile: interrupted with the rest.
+        continue;
+      }
+      turn.waiting.delete(item);
+      turn.given.delete(item);
+      turn.retake.push({ item, ...words });
+    }
+    if (turn.started) await this.cut(turn);
+  }
+
+  /** The session interrupted partway through the turn's words, for a pause. */
+  private async cut(turn: Turn): Promise<void> {
+    turn.cutShort = true;
+    await this.options.opencode.interrupt(turn.sessionId).catch(() => undefined);
+  }
+
+  /**
+   * Resumed: a session stopped partway is told to carry on, in one prompt with the words the pause
+   * took back and what was steered meanwhile after it; one stopped before it took the turn's words
+   * is given them again as they were. Words steered while nothing was stopped, or while this was
+   * given, go as any person's words mid-run.
+   */
+  private async carryOn(turn: Turn): Promise<void> {
+    if (turn.halted) {
+      const retake = turn.retake.splice(0);
+      try {
+        if (turn.cutShort) {
+          // A second pause took back the carry-on words of the first: they are said once.
+          const more = retake.map((each) => (each.text.startsWith(CARRY_ON) ? each.text.slice(CARRY_ON.length) : each.text).trim());
+          const steers = turn.steers.splice(0).map((each) => each.text);
+          const words = [CARRY_ON, ...more, ...steers].filter((part) => part !== "").join("\n\n");
+          this.wait(turn, await this.hand(turn, words));
+        } else {
+          for (const each of retake) this.wait(turn, await this.hand(turn, each.text, each.delivery));
+        }
+      } catch (error) {
+        // Nothing will come of the session now: the turn ends, and says why.
+        turn.end({ outcome: "failed", why: `OpenCode didn't take the words to carry on: ${messageOf(error)}` });
+        return;
+      }
+      // Stopped while they were on their way: taken back and interrupted, as Stop's own are.
+      if (turn.cancelled) {
+        await this.cancel(turn);
+        return;
+      }
+      turn.waiting.delete(PAUSED);
+      turn.halted = false;
+      turn.cutShort = false;
+    }
+    for (const steer of turn.steers.splice(0)) await this.steered(turn, steer.text, steer.mode);
+  }
+
+  /** Whether the session waits on a person's answer: asked in Chips, and not yet given to OpenCode. */
+  private asking(turn: Turn): boolean {
+    return turn.questions > 0 || [...turn.approvals.values()].some((pending) => !pending.answered);
   }
 
   // ------------------------------------------------------------------ what OpenCode says
@@ -1397,18 +1608,35 @@ export class Bridge {
     const data = event.data;
     if (event.type === "session.inbox.delivered") {
       const item = text(data["inboxID"]) ?? "";
-      if (turn.waiting.delete(item)) turn.started = true;
+      const back = turn.retake.findIndex((each) => each.item === item);
+      const ours = turn.waiting.delete(item) || back !== -1;
+      if (ours) turn.started = true;
       else turn.taken.add(item);
+      // Taken after all, though a pause took it back: it isn't given again.
+      if (back !== -1) turn.retake.splice(back, 1);
+      turn.given.delete(item);
+      // The turn's words taken while a pause holds the session, too late to take back or given as
+      // the pause landed: what they start is stopped too.
+      if (ours && turn.halted && turn.run.paused) await this.cut(turn);
       return;
     }
     // Until the session takes the turn's words, what it does is somebody else's.
     if (!turn.started || turn.run.over) return;
     switch (event.type) {
+      case "session.execution.started":
+        if (turn.halted && turn.run.paused) turn.strayWork = true;
+        return;
       case "session.execution.succeeded":
       case "session.execution.failed":
-      case "session.execution.interrupted":
-        if (turn.waiting.size === 0) turn.end(endOf(event));
+      case "session.execution.interrupted": {
+        // While a pause holds the session, the end of what it stopped isn't the turn's (OpenCode may
+        // say an interrupt as a failure). One that succeeded with nothing else waiting, and nothing
+        // begun since the pause, finished before the pause reached it: its answer stands, as it would have.
+        const left = turn.waiting.size - (turn.waiting.has(PAUSED) ? 1 : 0);
+        const finished = left === 0 && !turn.strayWork && event.type === "session.execution.succeeded";
+        if (turn.waiting.size === 0 || finished) turn.end(endOf(event));
         return;
+      }
       case "session.reasoning.ended":
         this.sayThought(turn, text(data["text"]) ?? "", "thinking");
         return;
@@ -1491,7 +1719,8 @@ export class Bridge {
   }
 
   private sayNow(turn: Turn, line: string, phase: string): void {
-    if (line === "") return;
+    // A paused run's bubble says Paused: what its session said on the way to stopping isn't news.
+    if (line === "" || turn.run.paused) return;
     turn.saidAt = Date.now();
     void turn.run.status({ phase, verbPhrase: line.slice(0, 200) }).catch(() => undefined);
   }
@@ -1598,8 +1827,11 @@ export class Bridge {
     });
     const stopped = new Promise<undefined>((resolve) => turn.run.on("cancel", () => resolve(undefined)));
     const decision = await Promise.race([asking, stopped]);
+    // An answer given while the run is paused reaches OpenCode once it is resumed (Chips ADR 0293);
+    // stopped meanwhile, Stop's interrupt has done with the ask.
+    if (decision !== undefined) await turn.run.whenRunning();
     const pending = turn.approvals.get(requestId);
-    if (decision === undefined || pending === undefined || pending.answered) return;
+    if (decision === undefined || turn.run.over || pending === undefined || pending.answered) return;
     pending.answered = true;
     if (decision.allowed && toolCall !== undefined) turn.allowed.set(toolCall, approvalId);
     await this.options.opencode
@@ -1632,6 +1864,8 @@ export class Bridge {
         `opencode-permission:${requestId}:settled`,
       )
       .catch(() => undefined);
+    // Answered there while the run is paused: the session goes on from it, and the pause stops it.
+    if (turn.run.paused) await this.halt(turn);
   }
 
   /**
@@ -1649,21 +1883,30 @@ export class Bridge {
       this.log(`a form of OpenCode's Chips can't show (${formId}): answer it in OpenCode`);
       return;
     }
-    const asking = turn.run.question({ questions: questions as NonNullable<(typeof questions)[number]>[] });
-    const stopped = new Promise<undefined>((resolve) => turn.run.on("cancel", () => resolve(undefined)));
-    const answer = await Promise.race([asking, stopped]);
-    if (answer === undefined || answer.timedOut) return;
-    const filled: Record<string, FormAnswer[string]> = {};
-    for (const field of fields) {
-      const given = answer.answers[field.key];
-      if (given === undefined) continue;
-      if (field.type === "boolean") filled[field.key] = given.values[0] === "yes";
-      else if (field.type === "multiselect") filled[field.key] = [...given.values, ...(given.freeText === undefined ? [] : [given.freeText])];
-      else filled[field.key] = given.freeText ?? given.values[0] ?? "";
+    // While it is open the session waits on the answer, and a pause has nothing to stop.
+    turn.questions += 1;
+    try {
+      const asking = turn.run.question({ questions: questions as NonNullable<(typeof questions)[number]>[] });
+      const stopped = new Promise<undefined>((resolve) => turn.run.on("cancel", () => resolve(undefined)));
+      const answer = await Promise.race([asking, stopped]);
+      if (answer === undefined || answer.timedOut) return;
+      // Answered while the run is paused, it reaches OpenCode once it is resumed (Chips ADR 0293).
+      await turn.run.whenRunning();
+      if (turn.run.over) return;
+      const filled: Record<string, FormAnswer[string]> = {};
+      for (const field of fields) {
+        const given = answer.answers[field.key];
+        if (given === undefined) continue;
+        if (field.type === "boolean") filled[field.key] = given.values[0] === "yes";
+        else if (field.type === "multiselect") filled[field.key] = [...given.values, ...(given.freeText === undefined ? [] : [given.freeText])];
+        else filled[field.key] = given.freeText ?? given.values[0] ?? "";
+      }
+      await this.options.opencode
+        .replyForm(askingSession, formId, filled)
+        .catch((error: unknown) => this.log(`OpenCode didn't take the answers: ${messageOf(error)}`));
+    } finally {
+      turn.questions -= 1;
     }
-    await this.options.opencode
-      .replyForm(askingSession, formId, filled)
-      .catch((error: unknown) => this.log(`OpenCode didn't take the answers: ${messageOf(error)}`));
   }
 
   // ------------------------------------------------------------------ after the stream was down
@@ -1679,7 +1922,7 @@ export class Bridge {
     for (const turn of [...this.turns.values()]) {
       const waiting = new Set(await opencode.waiting(turn.sessionId).catch(() => [...turn.waiting]));
       for (const item of [...turn.waiting]) {
-        if (item !== INTERRUPTING && !waiting.has(item)) {
+        if (!marked(item) && !waiting.has(item)) {
           turn.waiting.delete(item);
           turn.started = true;
         }
@@ -1930,6 +2173,11 @@ function lastWordsOf(words: Turn["words"]): string {
     .filter((each) => each.message === last.message)
     .map((each) => each.text)
     .join("\n\n");
+}
+
+/** Whether an item among a turn's waiting words is the bridge's own mark, not words OpenCode holds. */
+function marked(item: string): boolean {
+  return item === INTERRUPTING || item === PAUSED;
 }
 
 function endOf(event: OpenCodeEvent): End {

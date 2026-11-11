@@ -54,8 +54,11 @@ it("passes the golden scenario", async () => {
       },
     });
     assert.ok(report.passed, formatReport(report).join("\n"));
+    // The kit on npm (1.0.4) is from before a run could say it pauses (Chips ADR 0293): its server
+    // drops the field and says so, as a server from before it does, and nothing breaks.
+    const unknownToTheKit = "run.status carried `pausable`, which the protocol does not declare: Chips drops it";
     assert.deepEqual(
-      report.findings.filter((finding) => finding.severity !== "note"),
+      report.findings.filter((finding) => finding.severity !== "note" && finding.message !== unknownToTheKit),
       [],
       formatReport(report).join("\n"),
     );

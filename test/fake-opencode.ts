@@ -8,6 +8,9 @@
  * - `delegate` hands work to a sub-agent in a child session that says what it cost.
  * - `fail` fails.
  * - `slow` writes for a while, unless interrupted.
+ * - `long` says a first part, then writes the rest for a while, unless interrupted.
+ * - Told to carry on after a pause (Chips ADR 0293), it writes the rest for a while, unless
+ *   interrupted again, and says it.
  * - `drop` loses the event stream midway, and ends while nobody listens.
  * - A second look after a person's Not right? (Chips ADR 0200) answers again.
  * - `recall` says the first words its session remembers, a copy's from its original's.
@@ -134,6 +137,8 @@ export interface FakeOpenCode {
   infoAsked: number;
   /** While set, `GET /api/info` waits for it, then answers as the server was when asked. */
   held: Promise<void> | undefined;
+  /** While set, `POST /api/session` waits for it before it makes the session. */
+  making: Promise<void> | undefined;
   /** A session OpenCode no longer has. */
   forget(sessionId: string): void;
   /** What a session remembers. */
@@ -189,6 +194,7 @@ export async function startFakeOpenCode(
     up: true,
     infoAsked: 0,
     held: undefined,
+    making: undefined,
   };
 
   const emit = (type: string, data: Record<string, unknown>) => {
@@ -266,6 +272,14 @@ export async function startFakeOpenCode(
   const play = async (session: FakeSession, words: string) => {
     // Its last line says "ask them", which is not asking first.
     if (words.startsWith("Look at it again")) return step(session, async (message) => say(session, message, AGAIN));
+    if (words.startsWith("You were paused partway through this.")) {
+      for (let i = 0; i < 15 && !session.interrupted; i += 1) {
+        emit("session.text.delta", { sessionID: session.id, assistantMessageID: "msg_rest", ordinal: 0, delta: "." });
+        await sleep(20);
+      }
+      if (session.interrupted) return;
+      return step(session, async (message) => say(session, message, "All of it."));
+    }
     if (/\brecall\b/.test(words)) {
       return step(session, async (message) => say(session, message, `First said here: ${session.history[0] ?? "nothing"}`));
     }
@@ -347,6 +361,16 @@ export async function startFakeOpenCode(
       }
       if (session.interrupted) return;
       return step(session, async (message) => say(session, message, "Slowly done."));
+    }
+    if (/\blong\b/.test(words)) {
+      await step(session, async (message) => say(session, message, "Half of it."));
+      for (let i = 0; i < 30 && !session.interrupted; i += 1) {
+        emit("session.text.delta", { sessionID: session.id, assistantMessageID: "msg_long", ordinal: 0, delta: "." });
+        steerIn(session);
+        await sleep(20);
+      }
+      if (session.interrupted) return;
+      return step(session, async (message) => say(session, message, "All of it."));
     }
     if (/\bdelegate\b/.test(words)) {
       await step(session, async (message) => {
@@ -484,6 +508,7 @@ export async function startFakeOpenCode(
       }
       if (method === "POST" && path === "/api/session") {
         const body = await bodyOf(request);
+        await fake.making;
         const id = next("ses");
         first ??= id;
         const own = (body["location"] as { directory?: unknown } | undefined)?.directory;
