@@ -1,6 +1,6 @@
 {
   "name": "@chipschat/opencode",
-  "version": "1.0.24",
+  "version": "1.0.25",
   "description": "OpenCode as a Chips harness, on its V2 server (opencode serve): each OpenCode agent a Chips agent, each room an OpenCode session.",
   "license": "Apache-2.0",
   "repository": {
@@ -33,9 +33,9 @@
     "release": "npm run build && npm test && npm pack"
   },
   "devDependencies": {
-    "@chipschat/conformance": "1.0.4",
-    "@chipschat/harness": "1.0.4",
-    "@chipschat/protocol": "1.0.4",
+    "@chipschat/conformance": "1.0.5",
+    "@chipschat/harness": "1.0.5",
+    "@chipschat/protocol": "1.0.5",
     "@types/node": "22.19.0",
     "esbuild": "0.27.7",
     "tsx": "4.21.0",
