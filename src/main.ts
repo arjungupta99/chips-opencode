@@ -22,7 +22,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
+import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep, runsKept } from "@chipschat/harness";
 import { Bridge, type BridgeState, settingsFor, wantsFor } from "./bridge.js";
 import { handsOver, keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { moveOld, moveSessions } from "./move.js";
@@ -127,12 +127,23 @@ const saveState = (next: BridgeState) => writeFileSync(statePath, `${JSON.string
 // The sessions of folders that moved to ~/Chips, moved by OpenCode before any is used.
 if (offered !== undefined) await moveSessions(state, opencode, saveState, log);
 
+// Each try that fails is told here, every few seconds: said once, and again when the reason
+// changes, so a server down for a night is a line in the log and not thousands.
+let waitingFor: string | undefined;
+const waitingSaid = (why: string) => {
+  if (why !== waitingFor) log(`waiting for Chips: ${why}`);
+  waitingFor = why;
+};
 let bridge: Bridge | undefined;
 const chips = await connect({
   url: joined.url,
   token: joined.token,
   client: { name: "chips-opencode", version: VERSION },
   store: fileStore(join(folder, "chips-state.json")),
+  // The copy this machine keeps running starts at login, perhaps before its server is up: it waits
+  // and tries again, where a run by hand hears at once that Chips can't be reached.
+  waitForServer: runsKept(LABEL),
+  onWaiting: waitingSaid,
   // A person's Restart (Chips ADR 0094), heard only where the bridge runs OpenCode's server: one a
   // person runs themselves isn't the bridge's to restart, so this connection doesn't say it hears them.
   ...(server === undefined ? {} : { onRestart: () => bridge?.restart() }),
