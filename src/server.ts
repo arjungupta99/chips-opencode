@@ -47,6 +47,11 @@ export interface ServerOptions {
   readonly waitMs?: number;
   /** How long it is given to stop, for a restart, before it is killed (10 s). */
   readonly stopMs?: number;
+  /**
+   * Handed what stops the server this starts, before it is started: a stop that comes while the
+   * server hasn't answered yet, and so before anything is returned, still ends it.
+   */
+  readonly stopWith?: (stop: () => void) => void;
 }
 
 /** Why the bridge's own server isn't there, said so a person can act on it. */
@@ -184,6 +189,13 @@ export async function ownServer(options: ServerOptions): Promise<OwnServer> {
   let wait = 2000;
   let again: NodeJS.Timeout | undefined;
   const said: string[] = [];
+  /** The server started here ended, and not started again: nothing where it was one from before. */
+  const stop = () => {
+    stopping = true;
+    clearTimeout(again);
+    child?.kill("SIGTERM");
+  };
+  options.stopWith?.(stop);
   const start = () => {
     writeFileSync(path, `${JSON.stringify({ port, password }, null, 2)}\n`, { mode: 0o600 });
     const started = spawn(command, ["serve", "--hostname", "127.0.0.1", "--port", String(port)], {
@@ -285,11 +297,7 @@ export async function ownServer(options: ServerOptions): Promise<OwnServer> {
   return {
     url,
     password,
-    stop: () => {
-      stopping = true;
-      clearTimeout(again);
-      child?.kill("SIGTERM");
-    },
+    stop,
     restart: () => {
       restarting ??= restart().finally(() => {
         restarting = undefined;

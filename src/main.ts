@@ -36,6 +36,22 @@ const link = process.env["CHIPS_JOIN_LINK"] || undefined;
 
 const LABEL = "chat.chips.opencode";
 stopIfAsked(LABEL);
+// A stop is heard from here on, the start included, which can be hours of waiting for Chips: what
+// the start has opened so far is closed, the newest first. Heard only once the start was done, a
+// stop before then left the server it started running and nothing saved.
+const closing: (() => void)[] = [];
+// Once the start is done, a stop is a clean end. Before that it ends as the signal, as it always
+// has, so that whoever started it (`chips connect`, which reads an exit of 0 as connected) never
+// takes a start that was stopped for one that worked.
+let started = false;
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    for (const close of closing.reverse()) close();
+    if (started) process.exit(0);
+    process.removeAllListeners(signal);
+    process.kill(process.pid, signal);
+  });
+}
 const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
 // What it kept before 1.0.15, brought across to ~/Chips first, so everything after reads it
 // there; by the kept copy, where this run hands over to one (`handsOver`).
@@ -66,7 +82,8 @@ if (config.ownServer) {
   const cwd = config.directory ?? config.folders;
   mkdirSync(cwd, { recursive: true });
   try {
-    server = await ownServer({ folder, cwd, log });
+    // The server it starts is the stop's to end from the moment it is started, answering or not.
+    server = await ownServer({ folder, cwd, log, stopWith: (stop) => closing.push(stop) });
   } catch (error) {
     if (!(error instanceof ServerError)) throw error;
     stop(
@@ -150,6 +167,7 @@ const chips = await connect({
   // What a person changes of an agent from its page (Chips ADR 0241): its model and its files.
   settings: settingsFor(() => bridge),
 });
+closing.push(() => chips.close());
 
 // Each agent works on its room's project in a copy of its own (Chips ADR 0221), where git will.
 const git = await checkGit();
@@ -167,7 +185,9 @@ bridge = new Bridge({
   restartServer: server?.restart,
   ...(config.directory === undefined ? { folders: config.folders } : { directory: config.directory }),
 });
+closing.push(() => bridge?.stop());
 await bridge.start();
+started = true;
 log(`answering for ${config.agents.map((agent) => agent.name).join(", ")} through OpenCode at ${address.url}`);
 
 // Its first words in the room it joined, once: the card that followed its link waits for them.
@@ -180,12 +200,3 @@ await helloOnce(joined, {
       text: `Hi, I'm ${config.agents[0]?.name ?? config.name}, here through OpenCode. Ask me anything.`,
     }),
 }).catch((error: unknown) => log(`hello not said: ${String(error)}`));
-
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
-    bridge.stop();
-    chips.close();
-    server?.stop();
-    process.exit(0);
-  });
-}
