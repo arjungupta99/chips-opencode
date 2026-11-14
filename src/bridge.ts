@@ -43,7 +43,7 @@
  * person may compact from there (`windows.ts`).
  */
 
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -197,8 +197,12 @@ export interface BridgeOptions {
   readonly restartServer?: (() => Promise<void>) | undefined;
 }
 
-/** A folder under `root` named after an agent, `-2` and on when another agent has that one. */
-export function freeFolder(root: string, name: string, taken: readonly string[]): string {
+/**
+ * A folder under `root` named after an agent, `-2` and on when another agent has that one. For an
+ * agent made in Chips (`made`), never one on disk already either, which a deleted agent may have
+ * left: an agent the config names takes the folder of its name, where a person may have put its files.
+ */
+export function freeFolder(root: string, name: string, taken: readonly string[], made = false): string {
   const slug =
     name
       .toLowerCase()
@@ -206,7 +210,7 @@ export function freeFolder(root: string, name: string, taken: readonly string[])
       .replace(/^-+|-+$/g, "") || "agent";
   for (let count = 1; ; count += 1) {
     const folder = join(root, count === 1 ? slug : `${slug}-${count}`);
-    if (!taken.includes(folder)) return folder;
+    if (!taken.includes(folder) && !(made && existsSync(folder))) return folder;
   }
 }
 
@@ -513,6 +517,11 @@ export class Bridge {
       this.agents.push({ config, key, model, agentId: registered.agentId });
     }
     this.ours = new Set([...known.map((agent) => agent.agentId), ...this.agents.map((agent) => agent.agentId)]);
+    // One Chips no longer has was deleted while the bridge was away.
+    for (const who of this.kept()) {
+      const has = (agent: { readonly agentId: string; readonly key: string }) => agent.agentId === who || agent.key === who;
+      if (!this.agents.some(has) && !known.some(has)) this.forget(who);
+    }
     void this.listen();
     // Taken in the order they came: a message, then what was overheard after it (Chips ADR 0294).
     const inOrder = (what: string, then: () => Promise<void>) => {
@@ -533,6 +542,15 @@ export class Bridge {
     chips.on("feedback", (feedback) => {
       this.notRight(feedback).catch((error: unknown) => this.log(`a second look went wrong: ${messageOf(error)}`));
     });
+    // A person's delete of an agent: the workspace's event, which a harness hears of its own.
+    chips.on("event", (event) => {
+      const heard = event as unknown as Readonly<Record<string, unknown>>;
+      if (heard["type"] !== "agent.deleted" || heard["harness_id"] !== chips.harnessId) return;
+      const name = heard["name"];
+      this.forget(String(heard["agent_id"]), typeof name === "string" ? name : undefined);
+      // The harness's own set says which agents read each of its files.
+      void this.sendContexts();
+    });
     // Each agent's model and files as OpenCode has them now (Chips ADR 0241).
     for (const agent of await chips.agents.list().catch(() => [])) {
       if (agent.state !== "archived") await this.sendModel(agent.agentId);
@@ -542,6 +560,59 @@ export class Bridge {
     await this.sayHowItIs();
     this.health = setInterval(() => void this.sayHowItIs(), this.options.healthEveryMs ?? 30_000);
     this.health.unref();
+  }
+
+  /** Everyone the bridge keeps anything for: a configured agent by its key, any other by its Chips id. */
+  private kept(): Set<string> {
+    const { state } = this.options;
+    return new Set([
+      ...Object.keys(state.sessions).map((id) => id.slice(0, id.lastIndexOf("|"))),
+      ...Object.keys(state.folders ?? {}),
+      ...Object.keys(state.models ?? {}),
+      ...Object.keys(state.windows ?? {}),
+    ]);
+  }
+
+  /**
+   * An agent deleted in Chips: what the bridge kept for it goes, and nothing more is sent for it.
+   * Its folder stays, and the log says where: what it wrote is a person's to delete, and so are
+   * its sessions in OpenCode. Said in the log once, by its name where the delete was heard
+   * (`called`): a delete heard again after a start that already forgot the agent finds nothing of
+   * it, and says nothing.
+   */
+  private forget(agentId: string, called?: string): void {
+    const { state } = this.options;
+    const ours = this.ours.has(agentId);
+    const folder = state.folders?.[agentId];
+    let dropped = false;
+    const drop = (kept: Record<string, unknown> | undefined, id: string) => {
+      if (kept?.[id] === undefined) return;
+      delete kept[id];
+      dropped = true;
+    };
+    for (const [id, room] of this.rooms) {
+      if (room.who !== agentId) continue;
+      room.queue.length = 0;
+      clearTimeout(room.gathering);
+      this.rooms.delete(id);
+    }
+    for (const [id, sessionId] of Object.entries(state.sessions)) {
+      if (!id.startsWith(`${agentId}|`)) continue;
+      this.rules.forget(sessionId);
+      this.folders.delete(sessionId);
+      drop(state.sessions, id);
+    }
+    for (const id of [...this.saidBefore.keys()]) if (id.startsWith(`${agentId}|`)) this.saidBefore.delete(id);
+    drop(state.folders, agentId);
+    drop(state.models, agentId);
+    drop(state.windows, agentId);
+    this.compacting.delete(agentId);
+    this.ours.delete(agentId);
+    this.options.chips.settings.forget(agentId);
+    if (!dropped && !ours) return;
+    this.options.saveState(state);
+    const stays = folder !== undefined && existsSync(folder) ? `; its folder stays, ${folder}` : "";
+    this.log(`${called ?? agentId} deleted${stays}`);
   }
 
   stop(): void {
@@ -1559,7 +1630,7 @@ export class Bridge {
     let folder = state.folders?.[who];
     if (folder === undefined) {
       const name = await this.nameOf({ who, agent });
-      folder = freeFolder(root, name, Object.values(state.folders ?? {}));
+      folder = freeFolder(root, name, Object.values(state.folders ?? {}), who !== agent.key);
       state.folders = { ...state.folders, [who]: folder };
       saveState(state);
     }

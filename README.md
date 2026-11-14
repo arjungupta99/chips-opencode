@@ -188,6 +188,11 @@ first. The steps below run the bridge from this checkout instead, to work on it.
    the first time it is spoken to and kept after a rename; `folders` moves them. A `directory`
    puts every session in that one project instead, a repository the agents share.
 
+   Deleting an agent in Chips leaves its folder, and its sessions in OpenCode: what it wrote is
+   yours to delete, and the bridge's log says where the folder is. The bridge itself forgets the
+   agent: which session each of its rooms was, its model and its last context reading. An agent
+   made in Chips is never given a folder that is on disk already.
+
    Everything the bridge keeps is under `~/Chips` (Chips ADR 0283): its config, sessions, server
    password and state in `~/Chips/.bridges/opencode`, the agents' folders in
    `~/Chips/Agents/opencode`, where its own server runs from. Until 1.0.15 they were

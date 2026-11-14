@@ -4,7 +4,7 @@
  */
 
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -388,6 +388,15 @@ describe("the files an answer names", () => {
       ["page.html"],
     );
     assert.equal(opencode.created.length, 1, "the room's one session, in the agent's folder");
+  });
+
+  it("gives an agent made in Chips no folder that is on disk already, which a deleted agent may have left", () => {
+    const root = mkdtempSync(join(tmpdir(), "chips-opencode-left-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    mkdirSync(join(root, "nova"));
+    assert.equal(freeFolder(root, "Nova", [], true), join(root, "nova-2"));
+    assert.equal(freeFolder(root, "Vega", [], true), join(root, "vega"));
+    assert.equal(freeFolder(root, "Nova", []), join(root, "nova"), "an agent the config names takes the folder of its name");
   });
 
   it("names a folder after its agent, and another after a second agent of that name", () => {
@@ -1482,5 +1491,65 @@ describe("its health", () => {
     assert.equal(chips.statuses().at(-1)?.reason, "OpenCode isn't answering");
     opencode.up = true;
     await until(() => chips.statuses().at(-1)?.state === "ok");
+  });
+});
+
+// The bridge kept a deleted agent's sessions, model and context window for good, and said at every
+// start, once for each, that Chips had no agent of that id (Chips HS-26).
+describe("an agent a person deletes", () => {
+  /** Nova, an agent asked for in a room, after one turn there: of a harness that shows each agent's window. */
+  async function withNova(options: Parameters<typeof rig>[0] = {}) {
+    const chips =
+      options.chips ?? (await startFakeChips({ capabilities: ["agents", "new_agents", "models", "context_files", "context_windows"] }));
+    if (options.chips === undefined) open.push(() => chips.close());
+    const made = await rig({ ...options, chips });
+    if (options.chips !== undefined) return { ...made, room: "", nova: "" };
+    const room = await chips.openRoom("Trip");
+    const { askId } = await chips.askForAgent(room, "Nova");
+    await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId);
+    const nova = (await made.client.agents.list()).find((agent) => agent.name === "Nova")?.agentId ?? "";
+    await chips.say("when do we fly home?", room);
+    await sent(chips, "run.completed", (event) => event.space_id === room);
+    await until(() => made.state.windows?.[nova] !== undefined);
+    return { ...made, room, nova };
+  }
+
+  it("is forgotten, and its folder stays", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chips-opencode-deleted-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    const { chips, state, lines, room, nova } = await withNova({ folders: root });
+    const folder = state.folders?.[nova] ?? "";
+    assert.equal(folder, join(root, "nova"));
+    assert.ok(chips.workspace.deleteAgent(nova));
+    await until(() => state.sessions[`${nova}|${room}`] === undefined);
+    assert.deepEqual([state.folders?.[nova], state.models?.[nova], state.windows?.[nova]], [undefined, undefined, undefined]);
+    assert.ok(existsSync(folder), "what it wrote is kept");
+    assert.ok(lines.includes(`Nova deleted; its folder stays, ${folder}`), lines.join("\n"));
+  });
+
+  it("is forgotten at the next start when it was deleted while the bridge was away, and said once", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chips-opencode-deleted-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    const first = await withNova({ folders: root });
+    const { chips, state, room, nova } = first;
+    first.bridge.stop();
+    first.client.close();
+    assert.ok(chips.workspace.deleteAgent(nova));
+    const again = await withNova({ chips, state, folders: root });
+    assert.equal(state.sessions[`${nova}|${room}`], undefined);
+    assert.equal(state.windows?.[nova], undefined);
+    assert.ok(again.lines.includes(`${nova} deleted; its folder stays, ${join(root, "nova")}`), again.lines.join("\n"));
+    assert.deepEqual(
+      again.lines.filter((line) => line.includes("not sent")),
+      [],
+      "nothing sent for an agent Chips no longer has",
+    );
+    again.bridge.stop();
+    again.client.close();
+    const third = await withNova({ chips, state, folders: root });
+    assert.deepEqual(
+      third.lines.filter((line) => line.includes("deleted")),
+      [],
+    );
   });
 });
