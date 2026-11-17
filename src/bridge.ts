@@ -228,6 +228,16 @@ const INTERRUPTING = "interrupting";
 const PAUSED = "paused";
 /** What a session a pause stopped partway is told on Resume (Chips ADR 0293). */
 export const CARRY_ON = "You were paused partway through this. Carry on from where you stopped. Nothing you wrote before the pause reached the room, so write your whole reply.";
+/**
+ * What a session is told when its model's output limit cut off a call (finish `length`) and its
+ * work stopped there. A model that thinks at length can spend the whole limit thinking, with
+ * nothing written and no tool called. OpenCode ends its work there as if it had answered, where
+ * Claude Code, Hermes and OpenClaw carry on by themselves (Chips, 17 November 2026).
+ */
+export const OUT_OF_ROOM =
+  "Your last reply reached the model's output limit and was cut off. None of it reached the space, and its thinking is gone. Carry on from where the work stands: think briefly, and work in small steps, one tool call at a time. When you answer, write your whole answer.";
+/** How many times a turn is told to carry on after a cut, before it ends saying why. */
+export const CUT_CARRY_ONS = 2;
 /** The most a harness's trouble says (Chips ADR 0083). */
 const TROUBLE_CHARS = 200;
 /** How many feedbacks answered are remembered, so one heard again is nothing: a replay comes soon. */
@@ -345,10 +355,11 @@ export function joinedWords(message: MessageNew): string {
 
 /**
  * Whether a model call that ended this way was the last of an answer. OpenCode's own apps read
- * `tool-calls` and `unknown` as more to come, and anything else as the answer said.
+ * `tool-calls` and `unknown` as more to come, and anything else as the answer said. `length` is a
+ * call the model's output limit cut off: no answer, and the session is told to carry on.
  */
 function saidItsAnswer(finish: string | undefined): boolean {
-  return finish !== undefined && finish !== "tool-calls" && finish !== "unknown";
+  return finish !== undefined && finish !== "tool-calls" && finish !== "unknown" && finish !== "length";
 }
 
 /** How the session's work ended. */
@@ -436,6 +447,8 @@ interface Turn {
    * answer, and what a message taken then starts is a second answer; `tool-calls` when it goes on.
    */
   finished: string | undefined;
+  /** How many times in the turn the model's output limit has cut off the session's work. */
+  cuts: number;
   /** Everything heard for the turn, in order. */
   chain: Promise<void>;
   /** The agent's copy of the room's project, brought up to date as the turn began, and its name (Chips ADR 0221). */
@@ -1536,6 +1549,7 @@ export class Bridge {
       room,
       joined: new Map(),
       finished: undefined,
+      cuts: 0,
       chain: Promise.resolve(),
       project: readied === undefined ? undefined : { copy: readied.copy, name: readied.name },
     };
@@ -1890,6 +1904,36 @@ export class Bridge {
     for (const steer of turn.steers.splice(0)) await this.steered(turn, steer.text, steer.mode);
   }
 
+  /**
+   * The session's work ended on a model call its output limit cut off (finish `length`). What it
+   * said before the cut is no answer, and OpenCode won't carry on by itself, so the session is told
+   * to, in the same turn, up to `CUT_CARRY_ONS` times. The words said before are let go, as it is
+   * told none reached the space. Cut off once more, or with a Pause or Stop on the way, the run
+   * fails saying why, rather than end on words from before the cut.
+   */
+  private async outOfRoom(turn: Turn): Promise<void> {
+    const name = turn.agent.config.name;
+    turn.cuts += 1;
+    const why = `its model's output limit cut it off ${turn.cuts === 1 ? "" : `${turn.cuts} times in a row, `}before it finished`;
+    const going = turn.waiting.size === 0 && !turn.halted && !turn.cancelled && !turn.run.paused && !turn.run.over;
+    if (!going || turn.cuts > CUT_CARRY_ONS) {
+      this.log(`${name} stopped at its model's output limit in ${turn.run.spaceId}, cut off ${turn.cuts === 1 ? "once" : `${turn.cuts} times`}`);
+      turn.end({ outcome: "failed", why });
+      return;
+    }
+    turn.words.length = 0;
+    turn.recovered = undefined;
+    turn.finished = undefined;
+    try {
+      this.wait(turn, await this.hand(turn, OUT_OF_ROOM));
+    } catch (error) {
+      turn.end({ outcome: "failed", why: `${why}, and OpenCode didn't take the words to carry on: ${messageOf(error)}` });
+      return;
+    }
+    this.log(`${name} reached its model's output limit in ${turn.run.spaceId}: told to carry on (${turn.cuts} of ${CUT_CARRY_ONS})`);
+    this.sayNow(turn, "Reached the model's output limit: carrying on", "waiting");
+  }
+
   /** Whether the session waits on a person's answer: asked in Chips, and not yet given to OpenCode. */
   private asking(turn: Turn): boolean {
     return turn.questions > 0 || [...turn.approvals.values()].some((pending) => !pending.answered);
@@ -1974,7 +2018,9 @@ export class Bridge {
         // begun since the pause, finished before the pause reached it: its answer stands, as it would have.
         const left = turn.waiting.size - (turn.waiting.has(PAUSED) ? 1 : 0);
         const finished = left === 0 && !turn.strayWork && event.type === "session.execution.succeeded";
-        if (turn.waiting.size === 0 || finished) turn.end(endOf(event));
+        if (turn.waiting.size !== 0 && !finished) return;
+        if (event.type === "session.execution.succeeded" && turn.finished === "length") await this.outOfRoom(turn);
+        else turn.end(endOf(event));
         return;
       }
       case "session.reasoning.ended":

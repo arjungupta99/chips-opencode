@@ -15,11 +15,13 @@ import {
   Bridge,
   type BridgeState,
   CARRY_ON,
+  CUT_CARRY_ONS,
   cardOf,
   decisionOf,
   forkName,
   freeFolder,
   keyOf,
+  OUT_OF_ROOM,
   questionOf,
   secondLook,
   spoken,
@@ -541,6 +543,42 @@ describe("a turn", () => {
     const words = await reply(chips, started.run_id);
     assert.equal(words.payload["text"], "Here is the answer.");
     await sent(chips, "run.completed");
+  });
+});
+
+describe("a model call its output limit cut off (Chips, 17 November 2026)", () => {
+  const postsOf = (chips: FakeChips, runId: string | null | undefined) =>
+    chips.workspace.log.filter((event) => event.type === "message.post" && event.run_id === runId);
+
+  it("is carried on from in the same turn, whose answer is what it says after, not the words before the cut", async () => {
+    const { chips, opencode, lines } = await rig();
+    await chips.say("outgrow the plan");
+    const started = await sent(chips, "run.started");
+    const carrying = await sent(chips, "run.status", (event) => event.run_id === started.run_id && thought(event) && /output limit/.test(String(event.payload["verb_phrase"])));
+    assert.equal(carrying.payload["verb_phrase"], "Reached the model's output limit: carrying on");
+    const words = await reply(chips, started.run_id);
+    assert.equal(words.payload["text"], "Built it, one file at a time.");
+    const completed = await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+    assert.equal(completed.payload["summary"], "Built it, one file at a time.");
+    assert.equal(postsOf(chips, started.run_id).length, 1, "one answer, and nothing from before the cut");
+    assert.equal(count(chips, "run.started"), 1, "one run");
+    const sessionId = opencode.prompts[0]?.sessionId ?? "";
+    assert.deepEqual(opencode.prompts.slice(1), [{ sessionId, text: OUT_OF_ROOM, delivery: undefined }], "told once, in the same session");
+    assert.equal(opencode.created.length, 1);
+    assert.ok(lines.some((line) => line.endsWith(`told to carry on (1 of ${CUT_CARRY_ONS})`)), lines.join("\n"));
+  });
+
+  it("fails saying why when the limit cuts it off again after carrying on, and posts none of what it said before", async () => {
+    const { chips, opencode } = await rig();
+    await chips.say("outgrow the plan, always");
+    const started = await sent(chips, "run.started");
+    const failed = await sent(chips, "run.failed", (event) => event.run_id === started.run_id);
+    assert.equal(failed.payload["error"], "OpenCode: its model's output limit cut it off 3 times in a row, before it finished");
+    assert.equal(opencode.prompts.length, 1 + CUT_CARRY_ONS, "its words, and the words to carry on, twice");
+    assert.ok(opencode.prompts.slice(1).every((prompt) => prompt.text === OUT_OF_ROOM));
+    await sleep(50);
+    assert.equal(postsOf(chips, started.run_id).length, 0, "no answer: \"I'll start by reading the plan.\" was no answer");
+    assert.equal(count(chips, "run.completed"), 0);
   });
 });
 

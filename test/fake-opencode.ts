@@ -17,6 +17,9 @@
  * - A second look after a person's Not right? (Chips ADR 0200) answers again.
  * - `recall` says the first words its session remembers, a copy's from its original's.
  * - `full` reads a great deal, compacts itself, and answers.
+ * - `outgrow` says it will read the plan, reads it, then thinks until the model's output limit
+ *   cuts it off (finish `length`), with nothing said and no tool called, and its work ends there,
+ *   as OpenCode's does. Told to carry on, it answers; with `always`, every call it makes is cut off.
  * - Anything else reads a file, says so, and answers.
  *
  * A session is copied as OpenCode 2.0.25 copies one (`POST …/fork`): what it remembers, its
@@ -73,6 +76,8 @@ interface FakeSession {
   last: string;
   /** Its stream was lost: what it does until it ends nobody hears. */
   dropped?: boolean;
+  /** How many more of its calls, told to carry on, the output limit cuts off. */
+  cutsLeft?: number;
 }
 
 export interface Prompted {
@@ -213,8 +218,9 @@ export async function startFakeOpenCode(
     const on = of ?? session.model ?? model;
     emit("session.step.started", { sessionID: session.id, assistantMessageID: message, agent: session.agent, model: on, started: Date.now() });
     await does(message);
-    // A call that asked for a tool goes on to another; one that didn't has said its answer.
-    const finish = calledTool.delete(message) ? "tool-calls" : "stop";
+    // A call that asked for a tool goes on to another; one that didn't has said its answer, unless
+    // the output limit cut it off.
+    const finish = cutOff.delete(message) ? "length" : calledTool.delete(message) ? "tool-calls" : "stop";
     emit("session.step.ended", { sessionID: session.id, assistantMessageID: message, finish, cost: 0.0042, tokens: read });
     session.lastCall = { tokens: read, model: on, at: Date.now() };
     if (session.compactAsked === true) {
@@ -246,6 +252,18 @@ export async function startFakeOpenCode(
   };
   const toolDone = (session: FakeSession, message: string, id: string, text: string) =>
     emit("session.tool.success", { sessionID: session.id, assistantMessageID: message, id, content: [{ type: "text", text }], executed: false });
+  const cutOff = new Set<string>();
+  /** One model call that thinks until the output limit cuts it off: nothing said, no tool called. */
+  const thinkTooLong = (session: FakeSession) =>
+    step(
+      session,
+      async (message) => {
+        emit("session.reasoning.ended", { sessionID: session.id, assistantMessageID: message, ordinal: 0, text: "Let me write every file out first." });
+        cutOff.add(message);
+      },
+      undefined,
+      { ...tokens, output: 0, reasoning: 32_000 },
+    );
   const waitFor = (id: string) => new Promise<unknown>((resolve) => answers.set(id, resolve));
   /** A session's model as OpenCode keeps it: given no level, its level is `default`. */
   const leveled = (given: unknown) => ({ variant: "default", ...(given as Record<string, unknown>) });
@@ -285,6 +303,23 @@ export async function startFakeOpenCode(
       }
       if (session.interrupted) return;
       return step(session, async (message) => say(session, message, "All of it."));
+    }
+    // Before the rest: the words to carry on say "think briefly".
+    if (words.startsWith("Your last reply reached the model's output limit")) {
+      if ((session.cutsLeft ?? 0) > 0) {
+        session.cutsLeft = (session.cutsLeft ?? 0) - 1;
+        return thinkTooLong(session);
+      }
+      return step(session, async (message) => say(session, message, "Built it, one file at a time."));
+    }
+    if (/\boutgrow\b/.test(words)) {
+      session.cutsLeft = /\balways\b/.test(words) ? Number.POSITIVE_INFINITY : 0;
+      await step(session, async (message) => {
+        say(session, message, "I'll start by reading the plan.");
+        tool(session, message, "call_1", "read", { path: "PLAN.md" });
+        toolDone(session, message, "call_1", "the plan");
+      });
+      return thinkTooLong(session);
     }
     if (/\brecall\b/.test(words)) {
       return step(session, async (message) => say(session, message, `First said here: ${session.history[0] ?? "nothing"}`));
