@@ -162,6 +162,25 @@ export class OpenCodeClient {
     return [...new Set(named)];
   }
 
+  /**
+   * The config documents OpenCode read for a folder, else for the server's own, oldest first:
+   * where each is and what it says (Chips ADR 0299 reads their `permission`).
+   */
+  async configDocuments(directory?: string): Promise<{ readonly path: string; readonly info: Readonly<Record<string, unknown>> }[]> {
+    const where = directory ?? this.address.directory;
+    const answer = await this.fetcher(`${this.root}/api/config${where === undefined ? "" : whereIs(where)}`, {
+      headers: { authorization: this.auth },
+    });
+    if (!answer.ok) throw await failureOf(answer);
+    const entries = (await answer.json()) as unknown;
+    return (Array.isArray(entries) ? (entries as Record<string, unknown>[]) : [])
+      .filter((entry) => entry["type"] === "document" && typeof entry["path"] === "string")
+      .map((entry) => ({
+        path: entry["path"] as string,
+        info: (typeof entry["info"] === "object" && entry["info"] !== null ? entry["info"] : {}) as Readonly<Record<string, unknown>>,
+      }));
+  }
+
   async agents(): Promise<AgentInfo[]> {
     return (await this.catalogue("agent")) as AgentInfo[];
   }

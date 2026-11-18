@@ -106,6 +106,7 @@ import {
   olderSays,
   type PermissionDecision,
 } from "./opencode.js";
+import { opencodeOwnRules, sendOwnRules } from "./own-rules.js";
 
 export interface AgentConfig {
   /** What a person sees, and its @handle: `OpenCode`. */
@@ -570,6 +571,7 @@ export class Bridge {
       if (agent.state !== "archived") await this.sendModel(agent.agentId);
     }
     await this.sendContexts();
+    await this.sendOwnRules();
     await this.sendWindows();
     await this.sayHowItIs();
     this.health = setInterval(() => void this.sayHowItIs(), this.options.healthEveryMs ?? 30_000);
@@ -662,6 +664,7 @@ export class Bridge {
       this.why = undefined;
       // The same OpenCode, or one upgraded meanwhile: what it reads is asked again.
       this.readsNamed = undefined;
+      void this.sendOwnRules();
       // The event stream opened again now; what was missed meanwhile is read once it is.
       this.wake?.();
     } catch (error) {
@@ -1041,6 +1044,16 @@ export class Bridge {
       if (folder !== undefined) read.push({ agentId: agent.agentId, folder, reading: await this.readingOf(folder) });
     }
     return read;
+  }
+
+  /**
+   * What OpenCode's own config lets through without asking (Chips ADR 0299), as its server reads it
+   * for the project: sent at start and after a restart. Chips takes the same copy once; an older
+   * Chips, or an SDK before 1.0.10, takes none, and a server that can't say sends nothing.
+   */
+  private async sendOwnRules(): Promise<void> {
+    const documents = await this.options.opencode.configDocuments().catch(() => undefined);
+    if (documents !== undefined) await sendOwnRules(this.options.chips.settings, opencodeOwnRules(documents, this.places.home));
   }
 
   /** The harness's own set and each agent's files, as they are on disk now: each sent where it changed. */

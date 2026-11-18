@@ -64,6 +64,11 @@ OpenCode asks before anything its config and the agent don't allow (its rules fa
 so its permission asks reach Chips as cards. An `always` there is saved by OpenCode as well; a
 command never gets one, so the next command comes back to Chips, whose rule answers it.
 
+The bridge tells Chips what that config lets through (Chips ADR 0299), for the harness's
+Permissions page: `permission` from each config document OpenCode's server read
+(`GET /api/config`), the person's and the project's, at start and after a restart. It reads them
+and never writes them. Needs Chips SDK 1.0.10; on an older one nothing is sent.
+
 When the event stream drops, OpenCode doesn't replay what was missed. When it's back, the bridge
 reads each turn's session: which words were taken, whether it is still working, and how its last
 answer ended.
