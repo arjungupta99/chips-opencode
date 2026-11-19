@@ -881,6 +881,10 @@ describe("what it asks", () => {
     // A command's Always is OpenCode's once: Chips remembers its starts (Chips ADR 0239).
     assert.equal(decisionOf(decision("always"), true), "once");
     assert.equal(decisionOf(decision("always", false), true), "reject");
+    // With Chips's rules off OpenCode keeps it, as its own always (Chips ADR 0300).
+    const kept = (scope: Decision["scope"]) => ({ allowed: true, scope, keeps: "harness" }) as unknown as Decision;
+    assert.equal(decisionOf(kept("always"), true), "always");
+    assert.equal(decisionOf(kept("once"), true), "once");
   });
 
   it("shows an edit's diff, and a yes-or-no field as two choices, and leaves free text to OpenCode", () => {

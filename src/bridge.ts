@@ -2448,12 +2448,16 @@ interface Field {
 
 /**
  * OpenCode's decision for a person's answer: always where they said so, else once; a no is reject.
- * A command's Always is OpenCode's once (Chips ADR 0239): Chips remembers how each part of it
- * starts and answers the next ask itself, where OpenCode's own always would let through more.
+ * A command's Always is OpenCode's once while Chips keeps it (Chips ADR 0239): Chips remembers how
+ * each part of it starts and answers the next ask itself, where OpenCode's own always would let
+ * through more. With the harness's Chips's rules off, Chips keeps nothing and says OpenCode keeps
+ * it (`keeps: "harness"`, Chips ADR 0300), so a command's Always is OpenCode's own always.
  */
 export function decisionOf(decision: Decision, command = false): PermissionDecision {
   if (!decision.allowed) return "reject";
-  return decision.scope === "always" && !command ? "always" : "once";
+  if (decision.scope !== "always") return "once";
+  const harnessKeeps = (decision as { readonly keeps?: string }).keeps === "harness";
+  return !command || harnessKeeps ? "always" : "once";
 }
 
 /** A form field as a Chips question, or nothing for one Chips can't ask: free text, numbers, a link. */
