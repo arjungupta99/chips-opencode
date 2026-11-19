@@ -1534,6 +1534,20 @@ describe("its health", () => {
     opencode.up = true;
     await until(() => chips.statuses().at(-1)?.state === "ok");
   });
+
+  // One connected before the bridge told the two apart: OpenCode 1's server runs, so "isn't
+  // answering" sent people looking in the wrong place.
+  it("says an OpenCode 1 by its version, and what to do, and is fine once OpenCode 2 answers", async () => {
+    const { chips, opencode } = await rig();
+    opencode.older = "1.19.6";
+    await until(() => chips.statuses().some((status) => status.state === "trouble"));
+    assert.equal(
+      chips.statuses().at(-1)?.reason,
+      "OpenCode 1.19.6 is running, and Chips needs OpenCode 2: install OpenCode 2, then run `chips connect opencode` in a new terminal",
+    );
+    opencode.older = undefined;
+    await until(() => chips.statuses().at(-1)?.state === "ok");
+  });
 });
 
 // The bridge kept a deleted agent's sessions, model and context window for good, and said at every

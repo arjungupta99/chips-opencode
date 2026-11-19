@@ -75,6 +75,13 @@ export class OpenCodeError extends Error {
   }
 }
 
+/**
+ * What an OpenCode 1 already connected is, and what to do, for the harness's page in Chips and the
+ * bridge's log: the connect line again takes up OpenCode 2 from the PATH it is on by then.
+ */
+export const olderSays = (version: string) =>
+  `OpenCode ${version} is running, and Chips needs OpenCode 2: install OpenCode 2, then run \`chips connect opencode\` in a new terminal`;
+
 /** The fetch the client uses: the platform's, unless a test hands in its own. */
 export type Fetch = typeof fetch;
 
@@ -111,6 +118,26 @@ export class OpenCodeClient {
   async version(): Promise<string> {
     const info = await this.call("GET", "/api/info");
     return typeof info["version"] === "string" ? info["version"] : "";
+  }
+
+  /**
+   * The OpenCode 1 that answers here, when one does: its version, `1.19.6`. OpenCode 1 says it at
+   * `GET /global/health`, a route OpenCode 2 doesn't have (it answers that with its web page).
+   * OpenCode 1's server starts and lists its agents like OpenCode 2's, and then takes no turn the
+   * way this bridge sends one, so it is told apart before anything is asked of it.
+   */
+  async older(): Promise<string | undefined> {
+    try {
+      const answer = await this.fetcher(`${this.root}/global/health`, {
+        headers: { authorization: this.auth },
+        signal: AbortSignal.timeout(2000),
+      });
+      if (!answer.ok) return undefined;
+      const version = ((await answer.json()) as Record<string, unknown>)["version"];
+      return typeof version === "string" && /^[01]\./.test(version) ? version : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /** The root of the project a folder is in, as OpenCode has it: the folder itself, outside any repository. */

@@ -27,9 +27,10 @@ describe("OpenCode's card, from a link to its hello", { skip, timeout: 180_000 }
   let opencode: FakeOpenCode;
   let home: string;
   let card: CardLink;
-  /** A PATH with OpenCode installed on it (the fake), and one whose OpenCode won't start. */
+  /** A PATH with OpenCode installed on it (the fake), one whose OpenCode won't start, and one with OpenCode 1. */
   let installed: string;
   let broken: string;
+  let older: string;
   const kept = () =>
     Object.values(JSON.parse(readFileSync(join(home, ".config/chips/harness-keys.json"), "utf8")) as Record<string, string>).map(
       (record) => JSON.parse(record) as { harnessId: string; hello: string },
@@ -68,6 +69,10 @@ describe("OpenCode's card, from a link to its hello", { skip, timeout: 180_000 }
       `#!/bin/sh\nexec "${process.execPath}" --import "${import.meta.resolve("tsx")}" "${join(here, "test", "fake-serve.ts")}" "$@"\n`,
     );
     broken = shim(join(home, "broken"), "#!/bin/sh\necho 'Error: no provider is configured' >&2\nexit 1\n");
+    older = shim(
+      join(home, "older"),
+      `#!/bin/sh\nFAKE_SERVE_OLDER=1.19.6 exec "${process.execPath}" --import "${import.meta.resolve("tsx")}" "${join(here, "test", "fake-serve.ts")}" "$@"\n`,
+    );
   });
 
   after(async () => {
@@ -78,7 +83,9 @@ describe("OpenCode's card, from a link to its hello", { skip, timeout: 180_000 }
   it("stops on each thing not set up, and leaves the link good", async () => {
     // No OpenCode on a PATH of node and the system's.
     const bare = [process.execPath.replace(/\/node$/, ""), "/usr/bin", "/bin"].join(delimiter);
-    await stopped(card.command, /OpenCode isn't installed on this machine: install it with `curl -fsSL https:\/\/opencode\.ai\/install \| bash`/, bare);
+    await stopped(card.command, /OpenCode isn't installed on this machine: install it with `curl -fsSL https:\/\/opencode\.ai\/v2\/install \| bash`, then run this again in a new terminal\./, bare);
+    // OpenCode 1, which the older install line gives: it starts and lists its agents, and takes no turn.
+    await stopped(card.command, /OpenCode 1\.19\.6 is on this machine, and Chips needs OpenCode 2: install it with `curl -fsSL https:\/\/opencode\.ai\/v2\/install \| bash`, then open a new terminal\./, older);
     await stopped(card.command, /OpenCode's server didn't start at http:\/\/127\.0\.0\.1:\d+: Error: no provider is configured/, broken);
     // A person's own server named in the config, without its password; then the config gone again.
     // The config is where the bridge reads it now (Chips ADR 0283): one in `~/.chips-opencode`, where

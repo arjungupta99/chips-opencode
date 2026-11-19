@@ -140,6 +140,12 @@ export interface FakeOpenCode {
   readonly interrupts: string[];
   readonly withdrawn: string[];
   up: boolean;
+  /**
+   * While set, it plays OpenCode 1 of this version, as 1.19.6 answered on 18 November 2026:
+   * `GET /global/health` says the version to anybody, and `GET /api/info`, a route it doesn't
+   * have, gets its web page. The rest it answers as before, as OpenCode 1 lists its agents.
+   */
+  older: string | undefined;
   /** How many times `GET /api/info` was asked: the bridge's health checks among them. */
   infoAsked: number;
   /** While set, `GET /api/info` waits for it, then answers as the server was when asked. */
@@ -167,6 +173,8 @@ export async function startFakeOpenCode(
     pid?: number;
     /** What `GET /api/info` says it is: 2.0.29 unless set. */
     version?: string;
+    /** It plays OpenCode 1 of this version from the start (`older`). */
+    older?: string;
     /** What its config's `instructions` names, for every folder. */
     instructions?: string[];
     /** Why each compaction fails, when they do. */
@@ -199,6 +207,7 @@ export async function startFakeOpenCode(
     interrupts: [],
     withdrawn: [],
     up: true,
+    older: options.older,
     infoAsked: 0,
     held: undefined,
     making: undefined,
@@ -520,6 +529,14 @@ export async function startFakeOpenCode(
         await fake.held;
       }
       if (!up) return json(response, 503, { _tag: "Unavailable", message: "down" });
+      if (fake.older !== undefined && method === "GET" && path === "/global/health") {
+        return json(response, 200, { healthy: true, version: fake.older });
+      }
+      if (fake.older !== undefined && method === "GET" && path === "/api/info") {
+        response.writeHead(200, { "content-type": "text/html;charset=UTF-8" });
+        response.end("<!doctype html>\n<html></html>\n");
+        return;
+      }
       if (request.headers.authorization !== auth) return json(response, 401, { _tag: "UnauthorizedError", message: "Authentication required" });
       if (method === "GET" && path === "/api/info") {
         return json(response, 200, { version: options.version ?? "2.0.29", pid: options.pid ?? 1, urls: [], paths: { tmp: "/tmp" } });

@@ -103,6 +103,7 @@ import {
   type OpenCodeClient,
   OpenCodeError,
   type OpenCodeEvent,
+  olderSays,
   type PermissionDecision,
 } from "./opencode.js";
 
@@ -716,15 +717,19 @@ export class Bridge {
    * Trouble while the server doesn't answer, and fine once it does (ADR 0083). Nothing while a
    * restart is under way: its end says (ADR 0094). Nor an answer to a check asked before a restart
    * began, even one over by now: it is of the server before, and a failed restart's words would go.
+   * An OpenCode 1 answering is trouble too, and said by name: it was connected before the bridge
+   * told the two apart, and "isn't answering" is no help with a server that plainly runs.
    */
   private async sayHowItIs(): Promise<void> {
     if (this.restarting !== undefined) return;
     const restarts = this.restarts;
     const up = await this.options.opencode.healthy();
+    const older = up ? undefined : await this.options.opencode.older();
     if (this.restarts !== restarts) return;
     if (up) this.why = undefined;
     const chips = this.options.chips;
-    await (up ? chips.reportOk() : chips.reportTrouble(this.why ?? "OpenCode isn't answering")).catch(() => undefined);
+    const why = this.why ?? (older === undefined ? "OpenCode isn't answering" : olderSays(older));
+    await (up ? chips.reportOk() : chips.reportTrouble(why)).catch(() => undefined);
   }
 
   /** OpenCode's event stream, opened again whenever it drops, a little later each time it fails. */

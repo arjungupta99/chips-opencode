@@ -2,6 +2,12 @@
 
 [OpenCode](https://opencode.ai) as a [Chips](https://chipschat.ai) harness, on OpenCode's own V2
 server (`opencode serve`, 2.0).
+
+It needs OpenCode 2. OpenCode's older install line and its `opencode-ai` npm package install
+OpenCode 1, whose server takes no turn the way this bridge sends one. The bridge tells the two
+apart before it takes up a link, and stops with the line that installs OpenCode 2:
+`curl -fsSL https://opencode.ai/v2/install | bash`.
+
 - Each OpenCode agent you name (`build`, `plan`, or one of your own) is a Chips agent. The first is
   the harness's Main agent.
 - Each Chips room an agent is in is an OpenCode session of that agent, made the first time somebody
@@ -158,7 +164,8 @@ first. The steps below run the bridge from this checkout instead, to work on it.
 
 ## Run it
 
-1. Install OpenCode (opencode.ai), and `npm install` once in this repository.
+1. Install OpenCode 2 (`curl -fsSL https://opencode.ai/v2/install | bash`), and `npm install` once
+   in this repository.
 
 2. Join Chips once, with a link from Chips's gallery (Agents → Connect a harness → OpenCode), whose card gives
    this line with the link in it:

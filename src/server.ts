@@ -15,8 +15,12 @@ import { accessSync, constants, existsSync, readFileSync, writeFileSync } from "
 import { createServer } from "node:net";
 import { delimiter, join } from "node:path";
 
-/** OpenCode's own installer, as its site gives it: the line a stop says to run, as Claude Code's and Codex's do. */
-export const INSTALL_LINE = "curl -fsSL https://opencode.ai/install | bash";
+/**
+ * OpenCode 2's own installer, as its site gives it: the line a stop says to run, as Claude Code's
+ * and Codex's do. The line without `/v2` installs OpenCode 1, whose server isn't the one this
+ * bridge speaks to (`older` in `opencode.ts`).
+ */
+export const INSTALL_LINE = "curl -fsSL https://opencode.ai/v2/install | bash";
 import { createInterface } from "node:readline";
 
 /** The server the bridge runs, once it answers. */
@@ -173,7 +177,7 @@ export async function ownServer(options: ServerOptions): Promise<OwnServer> {
   }
   if (!before && !onPath(command, env)) {
     throw new ServerError(
-      `OpenCode isn't installed on this machine: install it with \`${INSTALL_LINE}\`, then run this again.`,
+      `OpenCode isn't installed on this machine: install it with \`${INSTALL_LINE}\`, then run this again in a new terminal.`,
       true,
     );
   }

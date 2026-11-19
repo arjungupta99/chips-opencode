@@ -26,7 +26,7 @@ import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, 
 import { Bridge, type BridgeState, settingsFor, wantsFor } from "./bridge.js";
 import { handsOver, keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { moveOld, moveSessions } from "./move.js";
-import { OpenCodeClient } from "./opencode.js";
+import { OpenCodeClient, olderSays } from "./opencode.js";
 import { configPathOf, configTargetOf } from "./places.js";
 import { INSTALL_LINE, type OwnServer, ownServer, ServerError } from "./server.js";
 import { type Config, checkOpenCode, hostOf, readConfig, SetupError, STILL_GOOD } from "./setup.js";
@@ -111,6 +111,12 @@ const offered = link !== undefined
       log(`OpenCode isn't answering at ${address.url} yet (${String(error)}): its agents are taken as configured`);
       return undefined;
     });
+// One connected before the bridge told OpenCode 1 from OpenCode 2: its log says so once, by name,
+// and its page in Chips says the same for as long as it is so.
+if (link === undefined) {
+  const older = await opencode.older();
+  if (older !== undefined) log(`${olderSays(older)} (\`${INSTALL_LINE}\`)`);
+}
 for (const agent of config.agents) {
   // An empty list is OpenCode not having loaded the project yet, not a missing agent (setup audit S12).
   if (offered !== undefined && offered.length > 0 && !offered.some((each) => each.id === agent.agent)) {

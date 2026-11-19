@@ -1,8 +1,8 @@
 /**
  * What the bridge checks before it takes up a link, which works once (Chips ADR 0122): the server
- * password filled in rather than the `…` the gallery's command was copied with, and OpenCode
- * answering to it. Anything missing stops it with what to do, and the link is still good for the
- * same command run again.
+ * password filled in rather than the `…` the gallery's command was copied with, OpenCode 2 rather
+ * than OpenCode 1, and OpenCode answering to it. Anything missing stops it with what to do, and the
+ * link is still good for the same command run again.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -11,6 +11,7 @@ import { filledIn, type StopWords } from "@chipschat/harness";
 import type { AgentConfig } from "./bridge.js";
 import { type AgentInfo, OpenCodeError } from "./opencode.js";
 import { foldersPathOf, fromHome, placesOf } from "./places.js";
+import { INSTALL_LINE } from "./server.js";
 
 export interface Config {
   readonly name: string;
@@ -91,11 +92,28 @@ export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
   };
 }
 
-/** OpenCode answering to the password, with the agents it offers, before the link is spent. */
+/**
+ * OpenCode 2 answering to the password, with the agents it offers, before the link is spent.
+ * OpenCode 1 would answer this far and fail the first message, so it stops here, by name.
+ */
 export async function checkOpenCode(
   config: Config,
-  client: { agents(): Promise<AgentInfo[]> },
+  client: { agents(): Promise<AgentInfo[]>; older?(): Promise<string | undefined> },
 ): Promise<AgentInfo[]> {
+  const older = await client.older?.();
+  if (older !== undefined) {
+    throw new SetupError(
+      config.ownServer
+        ? `OpenCode ${older} is on this machine, and Chips needs OpenCode 2: install it with \`${INSTALL_LINE}\`, then open a new terminal. ${STILL_GOOD}`
+        : `OpenCode ${older} answers at ${config.url}, and Chips needs OpenCode 2: install it there with \`${INSTALL_LINE}\`, then start its server again. ${STILL_GOOD}`,
+      {
+        detail: `OpenCode ${older} is on this Mac`,
+        says: "Chips needs OpenCode 2.",
+        doing: "Run this in Terminal, then try again.",
+        copy: INSTALL_LINE,
+      },
+    );
+  }
   try {
     return await client.agents();
   } catch (error) {

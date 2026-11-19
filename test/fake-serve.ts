@@ -3,7 +3,8 @@
  * OpenCode: on that port, to the password in `OPENCODE_PASSWORD`, saying its process in `/api/info`
  * as OpenCode does. Each start is counted in `$FAKE_SERVE_STARTS`, a file, when set;
  * `FAKE_SERVE_FAIL=1` says something and stops at once; `FAKE_SERVE_SLOW_MS` is how long it takes
- * before it answers, stopping meanwhile when it is told to.
+ * before it answers, stopping meanwhile when it is told to; `FAKE_SERVE_OLDER=1.19.6` is OpenCode 1
+ * of that version on the machine instead.
  */
 
 import { appendFileSync } from "node:fs";
@@ -26,7 +27,13 @@ if (slow > 0) {
   process.off("SIGINT", stopped);
   process.off("SIGTERM", stopped);
 }
-const fake = await startFakeOpenCode({ port, password: process.env["OPENCODE_PASSWORD"] ?? "", pid: process.pid });
+const older = process.env["FAKE_SERVE_OLDER"];
+const fake = await startFakeOpenCode({
+  port,
+  password: process.env["OPENCODE_PASSWORD"] ?? "",
+  pid: process.pid,
+  ...(older === undefined ? {} : { older }),
+});
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     void fake.close().then(() => process.exit(0));
