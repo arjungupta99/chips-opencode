@@ -49,7 +49,7 @@ Apache-2.0, published on npm as `@chipschat/opencode`.
 | An agent's model (Chips ADR 0241) | the models `GET /api/model` lists that OpenCode runs, each with its variants as levels; a person's pick put on the agent's session before its next message with `POST /api/session/{id}/model` (see [Models](#models)) |
 | An agent's files (Chips ADRs 0134, 0241) | the `AGENTS.md` files OpenCode reads for its folder, and from OpenCode 2.0.30 (`GET /api/info`) the files its config's `instructions` names (`GET /api/config`); a person's edit saved where OpenCode reads it (see [Context files](#context-files)) |
 | An agent's context window (Chips ADRs 0146, 0241) | its session's last model call's tokens, of its model's context limit from `GET /api/model`; Compact now is `POST /api/session/{id}/compact`, and `session.compaction.started`, `.ended` and `.failed` say how it went (see [Context window](#context-window)) |
-| An approval card | `permission.asked` → `POST …/permission/{id}/reply`: `always` when a person said always, else `once`, and `once` for a command, which Chips remembers by how each part starts (Chips ADR 0239); `reject` with their reason for a no. One answered in OpenCode's own apps is settled in Chips (ADR 0079) |
+| An approval card | `permission.asked` → `POST …/permission/{id}/reply`: `once` for a yes, an Always too while Chips keeps the rule (Chips ADR 0239); `always` only when Chips says OpenCode keeps it (`keeps: "harness"`, the harness's Chips's rules off, Chips ADR 0300); `reject` with their reason for a no. An ask that expires with nobody's answer gets no reply: the session is interrupted and the turn ends on one line in the space, "Nobody answered, so I stopped. Ask me to carry on." An ask Chips refuses is answered `reject` with why. One answered in OpenCode's own apps is settled in Chips (ADR 0079) |
 | A question | a `form.created` whose fields are choices or yes-or-no, at most four → `POST …/form/{id}/reply` |
 | Stop | `POST …/interrupt`, and the words OpenCode hasn't taken yet taken back |
 | Pause and Resume (Chips ADR 0293) | each run says it can pause, once, as it starts (`pausable` on a status of *Thinking…*). Pause: as Stop, but the run and the session are kept and nothing is said for the half-done part; while the agent waits on an answer nothing is interrupted, and an answer given meanwhile reaches OpenCode on Resume. Resume: a prompt in the same session, *You were paused partway through this. Carry on from where you stopped. Nothing you wrote before the pause reached the room, so write your whole reply.*, with what was steered meanwhile after it; words the pause took back before OpenCode took them are given again as they were |
@@ -61,8 +61,10 @@ Apache-2.0, published on npm as `@chipschat/opencode`.
 | Restart (Chips ADR 0094) | the bridge's own `opencode serve` stopped and started again on the same port and password; then `GET /api/info`: fine, or why it isn't back |
 
 OpenCode asks before anything its config and the agent don't allow (its rules fall back to "ask"),
-so its permission asks reach Chips as cards. An `always` there is saved by OpenCode as well; a
-command never gets one, so the next command comes back to Chips, whose rule answers it.
+so its permission asks reach Chips as cards. While the harness's Chips's rules are on, an Always
+there is kept by Chips alone: OpenCode is told `once`, so the next ask comes back to Chips, whose
+rule answers it, and switching that rule off brings the cards back. With Chips's rules off,
+OpenCode saves the `always` itself.
 
 The bridge tells Chips what that config lets through (Chips ADR 0299), for the harness's
 Permissions page: `permission` from each config document OpenCode's server read

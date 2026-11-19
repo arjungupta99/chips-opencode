@@ -26,6 +26,7 @@ import {
   secondLook,
   spoken,
   titleFrom,
+  UNANSWERED,
   WANTS,
   wantsFor,
 } from "../src/bridge.ts";
@@ -172,6 +173,35 @@ async function saidBy(client: Chips, spaceId: string, agentId: string): Promise<
 }
 
 const count = (chips: FakeChips, type: string) => chips.workspace.log.filter((event) => event.type === type).length;
+
+/** What a run posted in the space. */
+const postsIn = (chips: FakeChips, runId: string | null) =>
+  chips.workspace.log.filter((event) => event.type === "message.post" && event.run_id === runId).map((event) => event.payload["text"]);
+
+/** A person's Always on an ask of a harness whose Chips's rules are off: Chips writes no rule and says the harness keeps it (Chips ADR 0300). */
+function keptAlways(chips: FakeChips, asked: StoredEvent): Promise<StoredEvent> {
+  return chips.asOwner({
+    space_id: asked.space_id,
+    run_id: asked.run_id,
+    type: "approval.resolved",
+    approval_id: String(asked.payload["approval_id"]),
+    decision: "approved",
+    scope: "always",
+    keeps: "harness",
+  });
+}
+
+/** An ask's hour runs out with nobody's answer: Chips resolves it `expired`. */
+function expire(chips: FakeChips, asked: StoredEvent): Promise<StoredEvent> {
+  return chips.asOwner({
+    space_id: asked.space_id,
+    run_id: asked.run_id,
+    type: "approval.resolved",
+    approval_id: String(asked.payload["approval_id"]),
+    decision: "expired",
+    scope: "once",
+  });
+}
 
 // Its Main agent was "OpenCode 2" beside the "OpenCode" Chips made at the join (Chips ON-10).
 
@@ -873,18 +903,124 @@ describe("what it asks", () => {
     assert.deepEqual(opencode.formReplies, [{ formId: "frm_1", answer: { q0: "Blue" } }]);
   });
 
-  it("picks always only when the person did, and reject for a no", () => {
+  it("gives OpenCode an Always as once for what is not a command too, while Chips keeps the rule", async () => {
+    const { chips, opencode } = await rig();
+    await chips.say("read the notes outside");
+    const asked = await sent(chips, "approval.request");
+    assert.equal((asked.payload["action"] as { kind: string }).kind, "opencode.external_directory");
+    await chips.decide(String(asked.payload["approval_id"]), "approved", { scope: "always" });
+    // Chips wrote the rule. An always OpenCode saved too would outlive that rule being switched off.
+    assert.equal((await reply(chips, asked.run_id)).payload["text"], "Given: once");
+    assert.deepEqual(opencode.permissionReplies, [{ requestId: "per_7", decision: "once", message: undefined }]);
+  });
+
+  it("gives OpenCode its own always, heard from Chips, when Chips says OpenCode keeps it (Chips ADR 0300)", async () => {
+    const { chips, opencode } = await rig();
+    await chips.say("read the notes outside");
+    const asked = await sent(chips, "approval.request");
+    await keptAlways(chips, asked);
+    assert.equal((await reply(chips, asked.run_id)).payload["text"], "Given: always");
+    // A command's too.
+    await chips.say("ask first");
+    const next = await sent(chips, "approval.request", (event) => event.run_id !== asked.run_id);
+    await keptAlways(chips, next);
+    assert.equal((await reply(chips, next.run_id)).payload["text"], "Given: always");
+    assert.deepEqual(
+      opencode.permissionReplies.map((each) => [each.requestId, each.decision]),
+      [["per_7", "always"], ["per_1", "always"]],
+    );
+  });
+
+  it("picks always only when OpenCode is the one that keeps it, and reject for a no", () => {
     const decision = (scope: Decision["scope"], allowed = true) => ({ allowed, scope }) as Decision;
-    assert.equal(decisionOf(decision("always")), "always");
+    // Chips's rules on: Chips keeps the Always, a command's or not (Chips ADR 0239).
+    assert.equal(decisionOf(decision("always")), "once");
     assert.equal(decisionOf(decision("session")), "once");
+    assert.equal(decisionOf(decision("once")), "once");
     assert.equal(decisionOf(decision("once", false)), "reject");
-    // A command's Always is OpenCode's once: Chips remembers its starts (Chips ADR 0239).
-    assert.equal(decisionOf(decision("always"), true), "once");
-    assert.equal(decisionOf(decision("always", false), true), "reject");
+    assert.equal(decisionOf(decision("always", false)), "reject");
     // With Chips's rules off OpenCode keeps it, as its own always (Chips ADR 0300).
-    const kept = (scope: Decision["scope"]) => ({ allowed: true, scope, keeps: "harness" }) as unknown as Decision;
-    assert.equal(decisionOf(kept("always"), true), "always");
-    assert.equal(decisionOf(kept("once"), true), "once");
+    const kept = (scope: Decision["scope"], allowed = true) => ({ allowed, scope, keeps: "harness" }) as unknown as Decision;
+    assert.equal(decisionOf(kept("always")), "always");
+    assert.equal(decisionOf(kept("once")), "once");
+    assert.equal(decisionOf(kept("always", false)), "reject");
+  });
+
+  it("ends the turn on one line when nobody answers an ask, and gives OpenCode no answer", async () => {
+    const { chips, opencode } = await rig();
+    await chips.say("ask first");
+    const asked = await sent(chips, "approval.request");
+    await expire(chips, asked);
+    await sent(chips, "run.completed", (event) => event.run_id === asked.run_id);
+    // Not a reject, which the model would take as "try another way": its session is stopped.
+    assert.deepEqual(opencode.permissionReplies, []);
+    assert.deepEqual(opencode.interrupts, [opencode.prompts[0]?.sessionId]);
+    assert.deepEqual(postsIn(chips, asked.run_id), [UNANSWERED]);
+    assert.equal(UNANSWERED, "Nobody answered, so I stopped. Ask me to carry on.");
+    assert.equal(count(chips, "run.failed"), 0);
+    // The next message is a new turn, in the session that holds what it was doing.
+    await chips.say("hello again");
+    const next = await sent(chips, "run.completed", (event) => event.run_id !== asked.run_id);
+    assert.deepEqual(postsIn(chips, next.run_id), ["Here is the answer."]);
+    assert.equal(new Set(opencode.prompts.map((prompt) => prompt.sessionId)).size, 1);
+  });
+
+  it("lets go of every ask of the turn when one expires, with one line for them all", async () => {
+    const { chips, opencode } = await rig();
+    await chips.say("a pair of things");
+    const first = await sent(chips, "approval.request");
+    await until(() => count(chips, "approval.request") === 2);
+    await expire(chips, first);
+    await sent(chips, "run.completed", (event) => event.run_id === first.run_id);
+    assert.deepEqual(postsIn(chips, first.run_id), [UNANSWERED]);
+    // The other card's own expiry, an instant later, finds the turn over and changes nothing.
+    const second = chips.workspace.log.filter((event) => event.type === "approval.request")[1] as StoredEvent;
+    await expire(chips, second);
+    await sleep(150);
+    assert.deepEqual(opencode.permissionReplies, []);
+    assert.equal(opencode.interrupts.length, 1, "stopped once");
+    assert.deepEqual(postsIn(chips, first.run_id), [UNANSWERED]);
+  });
+
+  it("denies OpenCode's request with the reason when Chips refuses the ask", async () => {
+    const { chips, opencode, lines } = await rig();
+    await chips.say("something unaskable");
+    await until(() => opencode.permissionReplies.length === 1);
+    const [denied] = opencode.permissionReplies;
+    assert.equal(denied?.requestId, "per_6");
+    assert.equal(denied?.decision, "reject");
+    assert.match(String(denied?.message), /^Chips couldn't ask a person about this, so it isn't allowed: /);
+    assert.equal(count(chips, "approval.request"), 0, "no card came of it");
+    assert.ok(lines.some((line) => line.startsWith("Chips refused an ask of ")), "and the log says why");
+    // The session goes on from the no, and the turn ends as any other.
+    const run = await sent(chips, "run.completed");
+    assert.deepEqual(postsIn(chips, run.run_id), ["Given: reject"]);
+  });
+
+  it("keeps a card inside what the protocol takes, however long the command or odd the name", () => {
+    const kind = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/;
+    // A command longer than a preview may be: shown cut, inside a closed fence, and whole in the action.
+    const command = `echo ${"x".repeat(300_000)}`;
+    const shell = cardOf({ action: "shell", resources: [command] });
+    assert.equal(shell.preview?.body.length, 200_000);
+    assert.ok(shell.preview?.body.startsWith("```sh\necho xxx"));
+    assert.ok(shell.preview?.body.endsWith("…\n```"));
+    assert.deepEqual(shell.action.input, { command });
+    assert.equal(cardOf({ action: "shell", resources: ["npm test"] }).preview?.body, "```sh\nnpm test\n```");
+    // A file's path longer than a preview's title may be.
+    const path = `src/${"deep/".repeat(60)}a.ts`;
+    const edit = cardOf({ action: "edit", resources: [path], metadata: { files: [{ file: path, patch: "-a\n+b" }] } });
+    assert.equal(edit.preview?.title?.length, 200);
+    // A name of OpenCode's that is no word of an action's kind: a digit first, or nothing a kind takes.
+    for (const action of ["2fa", "_private", "Über Tool!", "…", "x".repeat(300)]) {
+      const card = cardOf({ action, resources: ["*"] });
+      assert.match(card.action.kind, kind, action);
+      assert.ok(card.action.kind.length <= 120, action);
+      assert.ok(String(card.question).length <= 200, action);
+    }
+    assert.equal(cardOf({ action: "2fa", resources: ["*"] }).action.kind, "opencode.fa");
+    assert.equal(cardOf({ action: "…", resources: ["*"] }).action.kind, "opencode.act");
+    assert.equal(cardOf({ action: "external_directory", resources: ["/tmp"] }).action.kind, "opencode.external_directory");
   });
 
   it("shows an edit's diff, and a yes-or-no field as two choices, and leaves free text to OpenCode", () => {

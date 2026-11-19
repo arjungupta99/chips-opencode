@@ -4,6 +4,10 @@
  * - `ask` asks permission before running a command, and says the decision it was given; `fetch`,
  *   the same to open a page whose address is longer than an approval's question may be.
  * - `elsewhere` asks, and is answered in OpenCode's own apps.
+ * - `outside` asks to work in a folder outside the project, and says the decision it was given.
+ * - `pair` asks for two things at once, and says both decisions.
+ * - `unaskable` asks about a tool call whose id is longer than Chips takes for a step's, so Chips
+ *   refuses the ask, and says the decision it was given.
  * - `question` asks a question by its form, and says the answer.
  * - `delegate` hands work to a sub-agent in a child session that says what it cost.
  * - `fail` fails.
@@ -332,6 +336,37 @@ export async function startFakeOpenCode(
     }
     if (/\brecall\b/.test(words)) {
       return step(session, async (message) => say(session, message, `First said here: ${session.history[0] ?? "nothing"}`));
+    }
+    if (/\boutside\b/.test(words)) {
+      let decision: unknown;
+      await step(session, async (message) => {
+        tool(session, message, "call_7", "read", { path: "/srv/notes/a.md" });
+        emit("permission.asked", { id: "per_7", sessionID: session.id, action: "external_directory", resources: ["/srv/notes/*"], source: { type: "tool", messageID: message, id: "call_7" } });
+        decision = await waitFor("per_7");
+        toolDone(session, message, "call_7", "");
+      });
+      return step(session, async (message) => say(session, message, `Given: ${String(decision)}`));
+    }
+    if (/\bpair\b/.test(words)) {
+      let decisions: unknown[] = [];
+      await step(session, async (message) => {
+        tool(session, message, "call_4", "read", { path: "/etc/hosts" });
+        tool(session, message, "call_5", "webfetch", { url: "https://example.com" });
+        emit("permission.asked", { id: "per_4", sessionID: session.id, action: "read", resources: ["/etc/hosts"], source: { type: "tool", messageID: message, id: "call_4" } });
+        emit("permission.asked", { id: "per_5", sessionID: session.id, action: "webfetch", resources: ["https://example.com"], source: { type: "tool", messageID: message, id: "call_5" } });
+        decisions = await Promise.all([waitFor("per_4"), waitFor("per_5")]);
+      });
+      return step(session, async (message) => say(session, message, `Given: ${decisions.join(", ")}`));
+    }
+    if (/\bunaskable\b/.test(words)) {
+      const id = `call_${"x".repeat(130)}`;
+      let decision: unknown;
+      await step(session, async (message) => {
+        tool(session, message, id, "shell", { command: "npm test" });
+        emit("permission.asked", { id: "per_6", sessionID: session.id, action: "shell", resources: ["npm test"], source: { type: "tool", messageID: message, id } });
+        decision = await waitFor("per_6");
+      });
+      return step(session, async (message) => say(session, message, `Given: ${String(decision)}`));
     }
     if ((options.askFirst === true && session.id === first) || /\bask\b/.test(words)) {
       let decision: unknown;

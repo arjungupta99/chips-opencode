@@ -240,6 +240,9 @@ export const OUT_OF_ROOM =
   "Your last reply reached the model's output limit and was cut off. None of it reached the space, and its thinking is gone. Carry on from where the work stands: think briefly, and work in small steps, one tool call at a time. When you answer, write your whole answer.";
 /** How many times a turn is told to carry on after a cut, before it ends saying why. */
 export const CUT_CARRY_ONS = 2;
+
+/** What a turn ends on, in the room, when an ask of its expired with nobody's answer. */
+export const UNANSWERED = "Nobody answered, so I stopped. Ask me to carry on.";
 /** The most a harness's trouble says (Chips ADR 0083). */
 const TROUBLE_CHARS = 200;
 /** How many feedbacks answered are remembered, so one heard again is nothing: a replay comes soon. */
@@ -411,6 +414,8 @@ interface Turn {
   recovered: string | undefined;
   saidAt: number;
   cancelled: boolean;
+  /** An ask of its expired with nobody's answer: the turn ends there, on `UNANSWERED`. */
+  unanswered: boolean;
   /** Tool calls by OpenCode's id: their tool, and whether Chips has a step for them. */
   readonly tools: Map<string, { name: string; open: boolean }>;
   /** Each answer's model, by its message. */
@@ -1553,6 +1558,7 @@ export class Bridge {
       recovered: undefined,
       saidAt: 0,
       cancelled: false,
+      unanswered: false,
       tools: new Map(),
       models: new Map(),
       approvals: new Map(),
@@ -1591,7 +1597,9 @@ export class Bridge {
     if (this.turns.get(sessionId) === turn) this.turns.delete(sessionId);
     room.turn = undefined;
     await this.putBack(turn);
-    if (last.outcome === "succeeded") await this.finish(turn);
+    // An ask nobody answered ended it: one line says so, however its session's work then ended.
+    if (turn.unanswered) await this.finish(turn, UNANSWERED);
+    else if (last.outcome === "succeeded") await this.finish(turn);
     else await this.ended(turn, last);
     // What OpenCode offers may have changed meanwhile, a provider set up, and the agent may have
     // changed its own files.
@@ -1770,6 +1778,26 @@ export class Bridge {
     turn.waiting.clear();
     await opencode.interrupt(turn.sessionId).catch(() => undefined);
     turn.end({ outcome: "interrupted", why: "user" });
+  }
+
+  /**
+   * An ask expired with nobody's answer, so the turn ends: the session is interrupted as Stop
+   * interrupts it, which is done with everything it asked, and the words it hasn't taken are
+   * withdrawn. OpenCode is not given a reject. A reject reads as "try another way", and its next
+   * try asks again, an hour later, all night. The turn ends on `UNANSWERED`.
+   */
+  private async unanswered(turn: Turn): Promise<void> {
+    if (turn.unanswered || turn.done) return;
+    turn.unanswered = true;
+    // Its other asks go with the interrupt: their cards' own expiry finds nothing left to answer.
+    for (const pending of turn.approvals.values()) pending.answered = true;
+    const { opencode } = this.options;
+    for (const item of turn.waiting) {
+      if (!marked(item)) await opencode.withdraw(turn.sessionId, item).catch(() => undefined);
+    }
+    turn.waiting.clear();
+    await opencode.interrupt(turn.sessionId).catch(() => undefined);
+    turn.end({ outcome: "interrupted", why: "unanswered" });
   }
 
   /**
@@ -2107,13 +2135,15 @@ export class Bridge {
         await this.toolEnded(turn, data, event.type === "session.tool.failed");
         return;
       case "permission.asked":
-        void this.asked(turn, data, own);
+        void this.asked(turn, data, own).catch((error: unknown) => this.log(`an ask of OpenCode's went wrong: ${messageOf(error)}`));
         return;
       case "permission.replied":
         await this.settled(turn, data);
         return;
       case "form.created":
-        void this.questioned(turn, (data["form"] ?? {}) as Record<string, unknown>);
+        void this.questioned(turn, (data["form"] ?? {}) as Record<string, unknown>).catch((error: unknown) =>
+          this.log(`a form of OpenCode's couldn't be asked in Chips: ${messageOf(error)}: answer it in OpenCode`),
+        );
         return;
       default:
         return;
@@ -2234,21 +2264,35 @@ export class Bridge {
       ...(own && toolCall !== undefined && turn.tools.get(toolCall)?.open === true ? { stepId: toolCall } : {}),
     });
     const stopped = new Promise<undefined>((resolve) => turn.run.on("cancel", () => resolve(undefined)));
-    const decision = await Promise.race([asking, stopped]);
+    let decision: Decision | undefined;
+    try {
+      decision = await Promise.race([asking, stopped]);
+    } catch (error) {
+      // Chips refused the ask, so no card will come of it and no answer: OpenCode's request is
+      // denied with why, rather than left waiting.
+      const pending = turn.approvals.get(requestId);
+      if (pending === undefined || pending.answered) return;
+      pending.answered = true;
+      const why = messageOf(error);
+      this.log(`Chips refused an ask of ${turn.agent.config.name}'s (${card.action.kind}): ${why}`);
+      await this.options.opencode
+        .replyPermission(askingSession, requestId, "reject", `Chips couldn't ask a person about this, so it isn't allowed: ${why}`.slice(0, 1000))
+        .catch((failed: unknown) => this.log(`OpenCode didn't take the answer: ${messageOf(failed)}`));
+      return;
+    }
     // An answer given while the run is paused reaches OpenCode once it is resumed (Chips ADR 0293);
     // stopped meanwhile, Stop's interrupt has done with the ask.
     if (decision !== undefined) await turn.run.whenRunning();
     const pending = turn.approvals.get(requestId);
     if (decision === undefined || turn.run.over || pending === undefined || pending.answered) return;
     pending.answered = true;
+    if (decision.decision === "expired") {
+      await this.unanswered(turn);
+      return;
+    }
     if (decision.allowed && toolCall !== undefined) turn.allowed.set(toolCall, approvalId);
     await this.options.opencode
-      .replyPermission(
-        askingSession,
-        requestId,
-        decisionOf(decision, card.action.kind === "shell.exec"),
-        decision.allowed ? undefined : decision.reason,
-      )
+      .replyPermission(askingSession, requestId, decisionOf(decision), decision.allowed ? undefined : decision.reason)
       .catch((error: unknown) => this.log(`OpenCode didn't take the answer: ${messageOf(error)}`));
   }
 
@@ -2348,8 +2392,11 @@ export class Bridge {
 
   // ------------------------------------------------------------------ the end
 
-  /** The turn is over: its last words in the room, and the run ended. */
-  private async finish(turn: Turn): Promise<void> {
+  /**
+   * The turn is over: its last words in the room, and the run ended. With `instead`, those words
+   * are said in place of the session's own.
+   */
+  private async finish(turn: Turn, instead?: string): Promise<void> {
     const { run, agent } = turn;
     if (run.over) return;
     await this.closeSteps(turn, "done");
@@ -2357,7 +2404,7 @@ export class Bridge {
       await run.executed(approvalId, "executed", "OpenCode didn't say how it went.").catch(() => undefined);
     }
     turn.allowed.clear();
-    const answer = spoken(turn.recovered ?? lastWordsOf(turn.words)).trim();
+    const answer = instead ?? spoken(turn.recovered ?? lastWordsOf(turn.words)).trim();
     const { change, note } = await this.sendProject(turn, answer);
     // The files its `MEDIA:` lines name go with its words, from its session's folder (Chips TT-7).
     const folder = await this.folderOf(turn.sessionId);
@@ -2374,7 +2421,7 @@ export class Bridge {
     const said = post.summary;
     const summary = said === "" ? "Done." : said.length <= 2000 ? said : `${said.slice(0, 1990)}…`;
     await run.complete({ summary });
-    this.log(`${agent.config.name} answered in ${run.spaceId}`);
+    this.log(instead === undefined ? `${agent.config.name} answered in ${run.spaceId}` : `${agent.config.name} stopped in ${run.spaceId}: ${instead}`);
   }
 
   /** Where a session works, as OpenCode says: the one folder its answers' files are sent from. */
@@ -2447,17 +2494,16 @@ interface Field {
 }
 
 /**
- * OpenCode's decision for a person's answer: always where they said so, else once; a no is reject.
- * A command's Always is OpenCode's once while Chips keeps it (Chips ADR 0239): Chips remembers how
- * each part of it starts and answers the next ask itself, where OpenCode's own always would let
- * through more. With the harness's Chips's rules off, Chips keeps nothing and says OpenCode keeps
- * it (`keeps: "harness"`, Chips ADR 0300), so a command's Always is OpenCode's own always.
+ * OpenCode's decision for a person's answer: a no is reject, and a yes is once, an Always too,
+ * while Chips keeps the rule (Chips ADR 0239). Chips remembers it and answers the next ask itself,
+ * so switching that rule off in Chips brings the asks back; an always OpenCode saved as well would
+ * be a second copy Chips can't see or remove. With the harness's Chips's rules off, Chips keeps
+ * nothing and says OpenCode keeps it (`keeps: "harness"`, Chips ADR 0300): the Always is then
+ * OpenCode's own always.
  */
-export function decisionOf(decision: Decision, command = false): PermissionDecision {
+export function decisionOf(decision: Decision): PermissionDecision {
   if (!decision.allowed) return "reject";
-  if (decision.scope !== "always") return "once";
-  const harnessKeeps = (decision as { readonly keeps?: string }).keeps === "harness";
-  return !command || harnessKeeps ? "always" : "once";
+  return decision.scope === "always" && decision.keeps === "harness" ? "always" : "once";
 }
 
 /** A form field as a Chips question, or nothing for one Chips can't ask: free text, numbers, a link. */
@@ -2501,11 +2547,13 @@ export function cardOf(
   const effect = said === undefined ? {} : { effect: said.slice(0, 500) };
   if (action === "shell") {
     const command = resources.join("\n");
+    // The fence takes 10 of the preview's characters; the action holds the whole command.
+    const shown = cut(command, PREVIEW_MAX - 10);
     return {
       action: { kind: "shell.exec", input: { command } },
       question: one !== undefined && one.length <= 80 ? `Run \`${one}\`?` : "Run these commands?",
       risk: [],
-      preview: { format: "markdown" as const, title: "Run a command", body: `\`\`\`sh\n${command}\n\`\`\`` },
+      preview: { format: "markdown" as const, title: "Run a command", body: `\`\`\`sh\n${shown}\n\`\`\`` },
       ...effect,
     };
   }
@@ -2516,7 +2564,7 @@ export function cardOf(
       action: { kind: "file.edit", input: { files: resources } },
       question: one === undefined ? "Change these files?" : `Change ${cut(baseName(one), QUESTION_MAX - 8)}?`,
       risk: [],
-      ...(patch === "" ? {} : { preview: { format: "diff" as const, title: one ?? "Changes", body: patch.slice(0, 200_000) } }),
+      ...(patch === "" ? {} : { preview: { format: "diff" as const, title: cut(one ?? "Changes", TITLE_MAX), body: patch.slice(0, PREVIEW_MAX) } }),
       ...effect,
     };
   }
@@ -2528,14 +2576,24 @@ export function cardOf(
     subagent: "Hand work to",
     question: "Ask you",
   };
-  const verb = plain[action] ?? `${action} on`;
+  const verb = cut(plain[action] ?? `${action} on`, 60);
   const what = resources.filter((each) => each !== "*").join(", ");
   return {
-    action: { kind: `opencode.${action.toLowerCase().replace(/[^a-z0-9_]+/g, "_") || "act"}`, input: { resources } },
+    action: { kind: `opencode.${kindWord(action)}`, input: { resources } },
     question: `${verb}${what === "" ? "" : ` ${cut(what, QUESTION_MAX - verb.length - 2)}`}?`,
     risk: action === "webfetch" || action === "websearch" ? ["external"] : [],
     ...effect,
   };
+}
+
+/**
+ * OpenCode's name for what it asks to do, as a word of an action's kind: the protocol takes lower
+ * case letters, digits and `_`, a letter first, and 120 characters for the whole kind. A name with
+ * none of them is `act`.
+ */
+function kindWord(action: string): string {
+  const word = action.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^[^a-z]+/, "").slice(0, 100);
+  return word === "" ? "act" : word;
 }
 
 /** What a tool call is about, for its step's title. */
@@ -2652,6 +2710,10 @@ export function secondLook(who: string, reply: string | undefined, note: string 
 /** At most `most` characters, the last of them an ellipsis where it was cut. */
 /** The most an approval's question holds: the protocol's `maxLength`, past which Chips refuses the ask. */
 const QUESTION_MAX = 200;
+
+/** The most a card's preview holds, and its title: the protocol's `max`, past which Chips refuses the ask. */
+const PREVIEW_MAX = 200_000;
+const TITLE_MAX = 200;
 
 function cut(words: string, most: number): string {
   return words.length <= most ? words : `${words.slice(0, most - 1)}…`;
