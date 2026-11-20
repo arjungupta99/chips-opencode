@@ -5,8 +5,9 @@
 
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
+import { ownRules } from "@chipschat/protocol";
 import { OpenCodeClient } from "../src/opencode.ts";
-import { joinedPermission, opencodeOwnRules, patternWords, sendOwnRules } from "../src/own-rules.ts";
+import { joinedPermission, NOTE, opencodeOwnRules, patternWords, sendOwnRules } from "../src/own-rules.ts";
 
 const HOME = "/Users/dana";
 
@@ -31,6 +32,51 @@ describe("OpenCode's permission, as entries", () => {
     ]);
     assert.equal(joinedPermission([{ path: "/a", info: { permission: { bash: "deny" } } }, { path: "/b", info: { permission: "allow" } }]), "allow");
     assert.equal(joinedPermission([{ path: "/a", info: {} }]), undefined);
+  });
+
+  it("reads OpenCode 2's list of rules, which its server hands back for each document, the last that matches deciding", () => {
+    // As OpenCode 2.0.25 answered GET /api/config for a document that wrote `permission` the old way,
+    // with `permissions` beside it, on 19 November 2026.
+    const joined = joinedPermission([
+      {
+        path: `${HOME}/.config/opencode/opencode.json`,
+        info: {
+          permissions: [
+            { action: "edit", resource: "*", effect: "ask" },
+            { action: "shell", resource: "*", effect: "ask" },
+            { action: "shell", resource: "git *", effect: "allow" },
+            { action: "webfetch", resource: "*", effect: "deny" },
+          ],
+        },
+      },
+      {
+        path: "/work/app/opencode.json",
+        info: {
+          permissions: [
+            { action: "shell", resource: "git *", effect: "ask" },
+            { action: "edit", resource: "src/*", effect: "allow" },
+            { action: "webfetch", resource: "*", effect: "allow" },
+            { action: "read", resource: "*", effect: "maybe" },
+          ],
+        },
+      },
+    ]);
+    assert.ok(joined instanceof Map);
+    assert.deepEqual(joined.get("edit"), [
+      ["*", "ask"],
+      ["src/*", "allow"],
+    ]);
+    assert.deepEqual(joined.get("shell"), [
+      ["*", "ask"],
+      ["git *", "ask"],
+    ]);
+    assert.equal(joined.get("webfetch"), "allow");
+    assert.equal(joined.has("read"), false, "not a rule OpenCode takes");
+    assert.equal(joinedPermission([{ path: "/a", info: { permissions: [{ action: "*", resource: "*", effect: "allow" }] } }]), "allow");
+    // The old key and the new one in one document: the old first, as OpenCode 2 reads them.
+    const both = joinedPermission([{ path: "/a", info: { permission: { bash: "ask" }, permissions: [{ action: "shell", resource: "*", effect: "allow" }] } }]);
+    assert.ok(both instanceof Map);
+    assert.deepEqual([...both], [["bash", "ask"], ["shell", "allow"]]);
   });
 });
 
@@ -68,7 +114,37 @@ describe("OpenCode's copy", () => {
       ["web", "webfetch"],
       ["command", "bash: rm *"],
     ]);
-    assert.match(copy.note ?? "", /asks before anything its config doesn't allow/);
+    assert.equal(copy.note, NOTE);
+    assert.equal(ownRules.safeParse(copy).success, true);
+  });
+
+  it("says commands and edits as OpenCode 2's list names them", () => {
+    const copy = opencodeOwnRules(
+      [
+        {
+          path: `${HOME}/.config/opencode/opencode.json`,
+          info: {
+            permissions: [
+              { action: "shell", resource: "*", effect: "ask" },
+              { action: "shell", resource: "git *", effect: "allow" },
+              { action: "edit", resource: "*", effect: "deny" },
+            ],
+          },
+        },
+      ],
+      HOME,
+    );
+    assert.deepEqual(copy.runs.map((entry) => [entry.kind, entry.name, entry.words, entry.raw]), [["command", "shell", ["git"], "shell: git *"]]);
+    assert.deepEqual(copy.refuses?.map((entry) => [entry.kind, entry.raw]), [["write", "edit"]]);
+  });
+
+  it("says OpenCode runs what its config doesn't make ask or refuse, as its build agent allows everything", () => {
+    // OpenCode 2.0.25's build agent: allow everything, then ask before reading `.env` files.
+    assert.match(NOTE, /runs whatever its config and the agent's own rules don't make ask or refuse/);
+    assert.match(NOTE, /build agent asks only before reading \.env files/);
+    assert.doesNotMatch(NOTE, /falls? back to asking|asks before anything/);
+    // An Always is OpenCode's own only while Chips's rules are off (`decisionOf`).
+    assert.match(NOTE, /kept by Chips while its rules are on, and saved by OpenCode when they're off/);
   });
 
   it("says it runs everything when its config allows everything, and nothing when it says nothing", () => {
