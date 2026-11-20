@@ -72,6 +72,8 @@ interface FakeSession {
   compactAsked?: boolean;
   title?: unknown;
   metadata?: unknown;
+  /** Its own rules, read after its agent's (2.0.25): a sub-agent's session is made with its parent's. */
+  permissions?: unknown;
   /** What it remembers: each person's words it took, and each answer, in order. */
   readonly history: string[];
   busy: boolean;
@@ -96,6 +98,7 @@ export interface Created {
   readonly model: unknown;
   readonly location: unknown;
   readonly metadata: unknown;
+  readonly permissions?: unknown;
 }
 
 /** What the thinking model answers, once its thinking is over. */
@@ -136,8 +139,10 @@ export interface FakeOpenCode {
   /** Each session switched onto a model (`POST /api/session/{id}/model`). */
   readonly switched: { sessionId: string; model: unknown }[];
   readonly forks: Forked[];
-  /** Each change a session's title or metadata was given. */
-  readonly updates: { sessionId: string; title: unknown; metadata: unknown }[];
+  /** The sessions it made for sub-agents, which no room asked for. */
+  readonly children: string[];
+  /** Each change a session's title, metadata or rules was given: its rules only where given. */
+  readonly updates: { sessionId: string; title: unknown; metadata: unknown; permissions?: unknown }[];
   readonly prompts: Prompted[];
   readonly permissionReplies: { requestId: string; decision: unknown; message: unknown }[];
   readonly formReplies: { formId: string; answer: unknown }[];
@@ -160,6 +165,10 @@ export interface FakeOpenCode {
   forget(sessionId: string): void;
   /** What a session remembers. */
   historyOf(sessionId: string): readonly string[];
+  /** A session's own rules (`permissions`), as `GET /api/session/{id}` says them. */
+  rulesOf(sessionId: string): unknown;
+  /** A session's own rules and metadata written by somebody else, as OpenCode's browser plugin writes them. */
+  write(sessionId: string, changes: { permissions?: unknown; metadata?: unknown }): void;
   /** Stopped and started again: its streams cut, nothing answering for `downMs`, its sessions kept. */
   restart(downMs: number): Promise<void>;
   close(): Promise<void>;
@@ -199,11 +208,12 @@ export async function startFakeOpenCode(
   /** The first session it made, which asks first with `askFirst`. */
   let first: string | undefined;
   const next = (prefix: string) => `${prefix}_${(count += 1)}`;
-  const fake: Omit<FakeOpenCode, "url" | "close" | "forget" | "historyOf" | "restart"> = {
+  const fake: Omit<FakeOpenCode, "url" | "close" | "forget" | "historyOf" | "rulesOf" | "write" | "restart"> = {
     password,
     created: [],
     switched: [],
     forks: [],
+    children: [],
     updates: [],
     prompts: [],
     permissionReplies: [],
@@ -471,8 +481,20 @@ export async function startFakeOpenCode(
     if (/\bdelegate\b/.test(words)) {
       await step(session, async (message) => {
         tool(session, message, "call_9", "subagent", { agent: "general", description: "Find three quotes", prompt: "Find three quotes." });
-        const child: FakeSession = { id: next("ses"), agent: "general", parentID: session.id, inbox: [], history: [], busy: true, interrupted: false, last: "" };
+        const child: FakeSession = {
+          id: next("ses"),
+          agent: "general",
+          parentID: session.id,
+          metadata: session.metadata,
+          permissions: session.permissions,
+          inbox: [],
+          history: [],
+          busy: true,
+          interrupted: false,
+          last: "",
+        };
         sessions.set(child.id, child);
+        fake.children.push(child.id);
         emit("session.created", { sessionID: child.id, parentID: session.id, projectID: "prj_1", slug: "child", version: "2.0.29" });
         await step(child, async (inner) => say(child, inner, "Three quotes."), { providerID: "nous", id: "heron-mini" });
         toolDone(session, message, "call_9", "Three quotes found.");
@@ -624,12 +646,20 @@ export async function startFakeOpenCode(
           ...(body["model"] === undefined ? {} : { model: leveled(body["model"]) }),
           title: body["title"],
           metadata: body["metadata"],
+          ...(body["permissions"] === undefined ? {} : { permissions: body["permissions"] }),
           history: [],
           busy: false,
           interrupted: false,
           last: "",
         });
-        fake.created.push({ id, agent: body["agent"], model: body["model"], location: body["location"], metadata: body["metadata"] });
+        fake.created.push({
+          id,
+          agent: body["agent"],
+          model: body["model"],
+          location: body["location"],
+          metadata: body["metadata"],
+          ...(body["permissions"] === undefined ? {} : { permissions: body["permissions"] }),
+        });
         emit("session.created", { sessionID: id, projectID: "prj_1", slug: "room", version: "2.0.29" });
         return json(response, 200, { data: { id, projectID: "prj_1", cost: 0, tokens, time: { created: 0, updated: 0 }, location: { directory: "/work" } } });
       }
@@ -645,6 +675,7 @@ export async function startFakeOpenCode(
             outcome: session.outcome,
             title: session.title,
             metadata: session.metadata,
+            ...(session.permissions === undefined ? {} : { permissions: session.permissions }),
             ...(session.model === undefined ? {} : { model: session.model }),
             location: { directory: session.directory ?? directory },
           },
@@ -666,9 +697,19 @@ export async function startFakeOpenCode(
       }
       const body = method === "DELETE" ? {} : await bodyOf(request);
       if (method === "PATCH" && rest === undefined) {
-        fake.updates.push({ sessionId: session.id, title: body["title"], metadata: body["metadata"] });
+        // Each field given replaces what it had whole, as OpenCode 2.0.25's does.
+        fake.updates.push({
+          sessionId: session.id,
+          title: body["title"],
+          metadata: body["metadata"],
+          ...("permissions" in body ? { permissions: body["permissions"] } : {}),
+        });
         if ("title" in body) session.title = body["title"];
         if ("metadata" in body) session.metadata = body["metadata"];
+        if ("permissions" in body) {
+          session.permissions = body["permissions"];
+          emit("session.permissions", { sessionID: session.id, permissions: session.permissions });
+        }
         return json(response, 204);
       }
       if (method === "POST" && rest === "fork") {
@@ -685,6 +726,7 @@ export async function startFakeOpenCode(
           ...(session.model === undefined ? {} : { model: session.model }),
           title,
           metadata: session.metadata,
+          ...(session.permissions === undefined ? {} : { permissions: session.permissions }),
           history: [...session.history],
           busy: false,
           interrupted: false,
@@ -704,6 +746,7 @@ export async function startFakeOpenCode(
             time: { created: 0, updated: 0 },
             title,
             metadata: session.metadata,
+            ...(session.permissions === undefined ? {} : { permissions: session.permissions }),
             location: { directory: session.directory ?? directory },
           },
         });
@@ -785,6 +828,13 @@ export async function startFakeOpenCode(
     url: `http://127.0.0.1:${port}`,
     forget: (sessionId: string) => void sessions.delete(sessionId),
     historyOf: (sessionId: string) => [...(sessions.get(sessionId)?.history ?? [])],
+    rulesOf: (sessionId: string) => sessions.get(sessionId)?.permissions,
+    write: (sessionId: string, changes: { permissions?: unknown; metadata?: unknown }) => {
+      const session = sessions.get(sessionId);
+      if (session === undefined) return;
+      if ("permissions" in changes) session.permissions = changes.permissions;
+      if ("metadata" in changes) session.metadata = changes.metadata;
+    },
     restart: async (downMs: number) => {
       fake.up = false;
       for (const stream of streams) stream.destroy();

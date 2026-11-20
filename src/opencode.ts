@@ -59,6 +59,32 @@ export interface ModelInfo {
 }
 
 export type PermissionDecision = "once" | "always" | "reject";
+
+/**
+ * One of OpenCode's permission rules (2.0.25): what it does with an action on a resource. A check
+ * joins the agent's rules, then the session's, and the last that matches decides; none matching
+ * asks. `edit` is every tool that writes a file (edit, write, patch), `shell` every command.
+ */
+export interface Rule {
+  readonly action: string;
+  readonly resource: string;
+  readonly effect: "allow" | "ask" | "deny";
+}
+
+/** A rule as OpenCode said it, or nothing for anything else. */
+export function ruleOf(value: unknown): Rule | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const { action, resource, effect } = value as Record<string, unknown>;
+  if (typeof action !== "string" || typeof resource !== "string") return undefined;
+  if (effect !== "allow" && effect !== "ask" && effect !== "deny") return undefined;
+  return { action, resource, effect };
+}
+
+/** The rules of a list OpenCode said, each that is one, in order. */
+export function rulesOf(value: unknown): Rule[] {
+  return Array.isArray(value) ? value.flatMap((each) => ruleOf(each) ?? []) : [];
+}
+
 export type Delivery = "steer" | "queue";
 export type FormAnswer = Readonly<Record<string, string | number | boolean | readonly string[]>>;
 
@@ -218,13 +244,17 @@ export class OpenCodeClient {
     }
   }
 
-  /** A session for a room, of one agent, in `directory`, else the project. */
+  /**
+   * A session for a room, of one agent, in `directory`, else the project, with rules of its own
+   * where it is given some, read after the agent's.
+   */
   async newSession(input: {
     readonly title: string;
     readonly agent: string;
     readonly model?: ModelRef | undefined;
     readonly directory?: string | undefined;
     readonly metadata?: Readonly<Record<string, unknown>> | undefined;
+    readonly permissions?: readonly Rule[] | undefined;
   }): Promise<string> {
     const directory = input.directory ?? this.address.directory;
     const made = await this.call("POST", "/api/session", {
@@ -233,6 +263,7 @@ export class OpenCodeClient {
       ...(input.model === undefined ? {} : { model: input.model }),
       ...(directory === undefined ? {} : { location: { directory } }),
       ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+      ...(input.permissions === undefined ? {} : { permissions: input.permissions }),
     });
     const id = (made["data"] as Record<string, unknown> | undefined)?.["id"];
     if (typeof id !== "string") throw new OpenCodeError("OpenCode made a session and named none", 502);
@@ -247,13 +278,21 @@ export class OpenCodeClient {
    * original there as `parentID`. A session with nothing in it is an `InvalidRequestError` of
    * kind `empty_session`.
    */
-  async fork(sessionId: string): Promise<{ readonly id: string; readonly metadata: Readonly<Record<string, unknown>> }> {
+  async fork(sessionId: string): Promise<{
+    readonly id: string;
+    readonly metadata: Readonly<Record<string, unknown>>;
+    readonly permissions: readonly Rule[];
+  }> {
     const made = await this.call("POST", `/api/session/${encodeURIComponent(sessionId)}/fork`, {});
     const data = (made["data"] as Record<string, unknown> | undefined) ?? {};
     const id = data["id"];
     if (typeof id !== "string") throw new OpenCodeError("OpenCode copied a session and named no copy", 502);
     const metadata = data["metadata"];
-    return { id, metadata: typeof metadata === "object" && metadata !== null ? (metadata as Record<string, unknown>) : {} };
+    return {
+      id,
+      metadata: typeof metadata === "object" && metadata !== null ? (metadata as Record<string, unknown>) : {},
+      permissions: rulesOf(data["permissions"]),
+    };
   }
 
   /**
@@ -264,14 +303,23 @@ export class OpenCodeClient {
     await this.call("POST", `/api/session/${encodeURIComponent(sessionId)}/move`, { directory });
   }
 
-  /** A session's title, or its metadata, which this replaces whole. */
+  /**
+   * A session's title, its metadata, or its own rules (`permissions`): each given replaces what it
+   * had whole, and the rest are left as they were. OpenCode reads a session's rules again at every
+   * check, so new ones apply from its next tool call, mid-run too.
+   */
   async update(
     sessionId: string,
-    changes: { readonly title?: string | undefined; readonly metadata?: Readonly<Record<string, unknown>> | undefined },
+    changes: {
+      readonly title?: string | undefined;
+      readonly metadata?: Readonly<Record<string, unknown>> | undefined;
+      readonly permissions?: readonly Rule[] | undefined;
+    },
   ): Promise<void> {
     await this.call("PATCH", `/api/session/${encodeURIComponent(sessionId)}`, {
       ...(changes.title === undefined ? {} : { title: changes.title }),
       ...(changes.metadata === undefined ? {} : { metadata: changes.metadata }),
+      ...(changes.permissions === undefined ? {} : { permissions: changes.permissions }),
     });
   }
 
