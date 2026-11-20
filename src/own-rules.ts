@@ -17,6 +17,7 @@
  */
 
 import { homedir } from "node:os";
+import { modeNote, modesCopy, type OwnModes } from "./modes.js";
 import { rulesOf } from "./opencode.js";
 
 /** One thing the config lets through, asks about, or refuses, as Chips's `ownEntry` has it. */
@@ -27,12 +28,14 @@ export interface OwnEntry {
   readonly raw?: string | undefined;
 }
 
-/** The copy, as Chips's `ownRules` has it (SDK 1.0.10's `OwnRules`). */
+/** The copy, as Chips's `ownRules` has it (SDK 1.0.11's `OwnRules`). */
 export interface OwnRules {
   readonly read_from: string[];
   readonly note?: string | undefined;
   readonly mode?: string | undefined;
   readonly everything?: boolean | undefined;
+  /** The modes a person may pick in Chips (Chips ADR 0300), as `modes.ts` writes them. */
+  readonly modes?: OwnModes | undefined;
   readonly runs: OwnEntry[];
   readonly asks?: OwnEntry[] | undefined;
   readonly refuses?: OwnEntry[] | undefined;
@@ -146,19 +149,24 @@ function entryOf(tool: string, pattern: string | undefined): OwnEntry {
   return { kind, name, ...(words === undefined ? {} : { words }), raw };
 }
 
-/** What the note says. */
+/** What the note says, whatever the mode. */
 export const NOTE =
   "OpenCode runs whatever its config and the agent's own rules don't make ask or refuse: out of the box its build agent asks only before reading .env files. An Always given in Chips is kept by Chips while its rules are on, and saved by OpenCode when they're off.";
 
-/** OpenCode's copy, from the config documents its server read, oldest first. */
-export function opencodeOwnRules(documents: readonly ConfigDocument[], home: string = homedir()): OwnRules {
+/**
+ * OpenCode's copy, from the config documents its server read, oldest first, with the modes a person
+ * may pick in Chips and the one its sessions run in (`running`, Chips ADR 0300).
+ */
+export function opencodeOwnRules(documents: readonly ConfigDocument[], home: string = homedir(), running?: string): OwnRules {
   const read_from = documents.length === 0 ? ["~/.config/opencode/opencode.json"] : documents.map((each) => tilde(each.path, home)).slice(-MOST_PLACES);
-  const note = NOTE;
+  const more = running === undefined ? undefined : modeNote(running);
+  const note = more === undefined ? NOTE : `${NOTE} ${more}`;
+  const modes = running === undefined ? {} : { modes: modesCopy(running) };
   const joined = joinedPermission(documents);
-  if (joined === "allow") return { read_from, note, everything: true, runs: [] };
+  if (joined === "allow") return { read_from, note, ...modes, everything: true, runs: [] };
   const lists: Record<Answer, OwnEntry[]> = { allow: [], ask: [], deny: [] };
   if (joined === "deny" || joined === "ask" || joined === undefined) {
-    return { read_from, note, runs: [], ...(joined === "deny" ? { refuses: [entryOf("*", undefined)] } : {}) };
+    return { read_from, note, ...modes, runs: [], ...(joined === "deny" ? { refuses: [entryOf("*", undefined)] } : {}) };
   }
   for (const [tool, rule] of joined) {
     if (typeof rule === "string") {
@@ -174,6 +182,7 @@ export function opencodeOwnRules(documents: readonly ConfigDocument[], home: str
   return {
     read_from,
     note,
+    ...modes,
     runs: lists.allow.slice(0, MOST),
     asks: lists.ask.slice(0, MOST),
     refuses: lists.deny.slice(0, MOST),

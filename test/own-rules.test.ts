@@ -147,6 +147,21 @@ describe("OpenCode's copy", () => {
     assert.match(NOTE, /kept by Chips while its rules are on, and saved by OpenCode when they're off/);
   });
 
+  it("says the modes a person may pick in Chips, the one its sessions run in, and what that mode adds", () => {
+    const plain = opencodeOwnRules([], HOME);
+    assert.equal(plain.modes, undefined);
+    for (const running of ["default", "ask-changes", "read-only"]) {
+      const copy = opencodeOwnRules([{ path: "/a/opencode.json", info: { permissions: [{ action: "*", resource: "*", effect: "allow" }] } }], HOME, running);
+      assert.equal(ownRules.safeParse(copy).success, true, running);
+      assert.deepEqual([copy.modes?.base, copy.modes?.running], ["default", running]);
+      assert.deepEqual(copy.modes?.offers.map((mode) => mode.name), ["Default", "Ask before changes", "Read-only"]);
+      assert.equal(copy.mode, undefined, "no mode the page reads as asking for whatever isn't listed");
+    }
+    assert.equal(opencodeOwnRules([], HOME, "default").note, NOTE);
+    assert.equal(opencodeOwnRules([], HOME, "ask-changes").note, `${NOTE} In Ask before changes, its sessions also have rules from Chips, read after these: edits and commands ask.`);
+    assert.equal(opencodeOwnRules([], HOME, "read-only").note, `${NOTE} In Read-only, its sessions also have rules from Chips, read after these: edits are refused and commands ask.`);
+  });
+
   it("says it runs everything when its config allows everything, and nothing when it says nothing", () => {
     assert.equal(opencodeOwnRules([{ path: "/a/opencode.json", info: { permission: "allow" } }], HOME).everything, true);
     const empty = opencodeOwnRules([], HOME);

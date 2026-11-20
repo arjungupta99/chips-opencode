@@ -41,6 +41,10 @@
  * session of the agent's before its next message. It shows the files OpenCode builds the agent
  * from too (`context.ts`), which a person may change there, and how full its session is, which a
  * person may compact from there (`windows.ts`).
+ *
+ * The harness's settings page in Chips has a Mode picker (Chips ADR 0300, addenda of 19 November
+ * 2026, `modes.ts`): Default, Ask before changes or Read-only, made of OpenCode's own rules and set
+ * on each session Chips opens, while the pick holds; its end puts them back in Default.
  */
 
 import { existsSync, mkdirSync } from "node:fs";
@@ -106,6 +110,7 @@ import {
   olderSays,
   type PermissionDecision,
 } from "./opencode.js";
+import { BASE, CHIPS_RULES, inMode, modeRules, modeTarget, nameOf } from "./modes.js";
 import { opencodeOwnRules, sendOwnRules } from "./own-rules.js";
 
 export interface AgentConfig {
@@ -517,6 +522,18 @@ export class Bridge {
   private readsNamed: Promise<boolean> | undefined;
   /** Agents compacting now, by whose sessions they are: waiting for their session's next step, or under way, and the ask from Chips. */
   private readonly compacting = new Map<string, { state: "queued" | "running"; changeId?: string | undefined }>();
+  /**
+   * The mode its sessions go into (Chips ADR 0300): the pick in Chips while it holds, else Default.
+   * Sessions are put in a mode one at a time, and a new one is made between, so none is missed.
+   */
+  private modeWanted = BASE;
+  /** The pick it last heard of, which may be none of its modes. */
+  private modePicked: string | undefined;
+  private moding: Promise<unknown> = Promise.resolve();
+  /** The mode its sessions run in, as far as the bridge put them there: what Chips is told. */
+  private modeNow = BASE;
+  /** Sessions the bridge couldn't put in `modeWanted`, each tried again before its next turn. */
+  private readonly behind = new Set<string>();
 
   constructor(private readonly options: BridgeOptions) {
     this.log = options.log ?? (() => undefined);
@@ -562,6 +579,12 @@ export class Bridge {
     chips.on("feedback", (feedback) => {
       this.notRight(feedback).catch((error: unknown) => this.log(`a second look went wrong: ${messageOf(error)}`));
     });
+    // A mode a person picked in Chips, put back, or whose time is up (Chips ADR 0300): every session moves.
+    chips.on("mode", () => {
+      this.remode()
+        .then(() => this.sendOwnRules())
+        .catch((error: unknown) => this.log(`a mode from Chips went wrong: ${messageOf(error)}`));
+    });
     // A person's delete of an agent: the workspace's event, which a harness hears of its own.
     chips.on("event", (event) => {
       const heard = event as unknown as Readonly<Record<string, unknown>>;
@@ -576,6 +599,8 @@ export class Bridge {
       if (agent.state !== "archived") await this.sendModel(agent.agentId);
     }
     await this.sendContexts();
+    // The pick that holds now, or Default for one whose time ran out while the bridge was off.
+    await this.remode().catch((error: unknown) => this.log(`its sessions' mode went wrong: ${messageOf(error)}`));
     await this.sendOwnRules();
     await this.sendWindows();
     await this.sayHowItIs();
@@ -897,13 +922,18 @@ export class Bridge {
     if (pick !== undefined) state.models = { ...state.models, [copy.agentId]: pick };
     saveState(state);
     if (copied !== undefined) {
-      // The copy came with the original's room and name: it is called and marked for its own.
-      await opencode
-        .update(copied.id, {
-          title: `Chips space ${spaceId}`,
-          metadata: { ...copied.metadata, chips_space: spaceId, chips_agent: copy.agentId },
-        })
-        .catch((error: unknown) => this.log(`${copy.name}'s session keeps ${name}'s title: ${messageOf(error)}`));
+      // The copy came with the original's room, name and rules: it is called and marked for its
+      // own, and in the mode in force.
+      await this.oneAtATime(async () => {
+        const moved = inMode(copied, this.modeWanted);
+        await opencode
+          .update(copied.id, {
+            title: `Chips space ${spaceId}`,
+            metadata: { ...(moved?.metadata ?? copied.metadata), chips_space: spaceId, chips_agent: copy.agentId },
+            ...(moved === undefined ? {} : { permissions: moved.permissions }),
+          })
+          .catch((error: unknown) => this.log(`${copy.name}'s session keeps ${name}'s title: ${messageOf(error)}`));
+      });
     }
     this.log(
       `${copy.name}, a copy of ${name}, made${kept.session === undefined ? " new" : ` from ${kept.session}`}` +
@@ -1058,7 +1088,93 @@ export class Bridge {
    */
   private async sendOwnRules(): Promise<void> {
     const documents = await this.options.opencode.configDocuments().catch(() => undefined);
-    if (documents !== undefined) await sendOwnRules(this.options.chips.settings, opencodeOwnRules(documents, this.places.home));
+    if (documents === undefined) return;
+    await sendOwnRules(this.options.chips.settings, opencodeOwnRules(documents, this.places.home, this.modeNow));
+  }
+
+  // ------------------------------------------------------------------ the mode a person picks in Chips
+
+  /** Work on its sessions' modes, after what was asked before it. */
+  private oneAtATime<T>(work: () => Promise<T>): Promise<T> {
+    const done = this.moding.then(work);
+    this.moding = done.catch(() => undefined);
+    return done;
+  }
+
+  /**
+   * Every session of Chips's into the mode in force (Chips ADR 0300): at start, and when a person
+   * picks one in Chips, puts it back, or its time is up. Its rooms' sessions and the sub-agents'
+   * the bridge has heard of; one line in the log for each change.
+   */
+  private remode(): Promise<void> {
+    return this.oneAtATime(async () => {
+      const picked = this.options.chips.mode;
+      const { mode, why } = modeTarget(picked);
+      const before = this.modeWanted;
+      const heard = picked?.id !== this.modePicked;
+      this.modeWanted = mode;
+      this.modePicked = picked?.id;
+      this.behind.clear();
+      const sessions = [...new Set([...Object.values(this.options.state.sessions), ...this.parents.keys()])];
+      let moved = 0;
+      let failed: string | undefined;
+      for (const [at, sessionId] of sessions.entries()) {
+        const put = await this.putIn(sessionId, mode);
+        if (put === "moved") moved += 1;
+        if (typeof put !== "object") continue;
+        failed ??= put.why;
+        // No answer at all: OpenCode isn't there, and the rest wait for their turns too.
+        if (!put.answered) for (const rest of sessions.slice(at + 1)) this.behind.add(rest);
+        if (!put.answered) break;
+      }
+      if (this.behind.size === 0) this.modeNow = mode;
+      if (failed !== undefined) {
+        this.log(`${this.behind.size} of ${sessions.length} of OpenCode's sessions go into ${nameOf(mode)} before their next turn instead: ${failed}`);
+      }
+      if (mode === before && moved === 0 && !(heard && why !== undefined)) return;
+      const said = `OpenCode's sessions ${mode === BASE ? "back in" : "in"} ${nameOf(mode)}`;
+      this.log(`${said}${why === undefined ? "" : `: ${why}`} (${moved} of ${sessions.length} changed)`);
+    });
+  }
+
+  /**
+   * A session into the mode in force before its turn, where it isn't in it: one the bridge couldn't
+   * put there when it changed, or whose rules something else has written since.
+   */
+  private moded(sessionId: string): Promise<void> {
+    return this.oneAtATime(async () => {
+      const mode = this.modeWanted;
+      const was = this.behind.delete(sessionId);
+      const put = await this.putIn(sessionId, mode);
+      if (put === "moved") this.log(`${sessionId} put in ${nameOf(mode)}`);
+      if (typeof put === "object") this.log(`${sessionId} isn't in ${nameOf(mode)}: ${put.why}`);
+      // The last that lagged is in it now: so are they all.
+      if (typeof put === "object" || !was || this.behind.size > 0) return;
+      this.modeNow = mode;
+      await this.sendOwnRules();
+    });
+  }
+
+  /**
+   * One session into a mode: the rules Chips added to it before taken off, and the mode's put after
+   * its others. `in` for one in it already, `gone` for one OpenCode no longer has; one it couldn't
+   * change waits in `behind`, with why, and whether OpenCode answered at all.
+   */
+  private async putIn(
+    sessionId: string,
+    mode: string,
+  ): Promise<"moved" | "in" | "gone" | { readonly why: string; readonly answered: boolean }> {
+    const { opencode } = this.options;
+    try {
+      const moved = inMode(await opencode.session(sessionId), mode);
+      if (moved === undefined) return "in";
+      await opencode.update(sessionId, moved);
+      return "moved";
+    } catch (error) {
+      if (error instanceof OpenCodeError && error.tag === "SessionNotFoundError") return "gone";
+      this.behind.add(sessionId);
+      return { why: messageOf(error), answered: error instanceof OpenCodeError };
+    }
   }
 
   /** The harness's own set and each agent's files, as they are on disk now: each sent where it changed. */
@@ -1628,6 +1744,7 @@ export class Bridge {
     if (kept !== undefined) {
       try {
         await this.modelled(kept, { who, agent });
+        await this.moded(kept);
         if (!(await this.running(run))) return undefined;
         const text = said(kept);
         return { sessionId: kept, given: await this.prompted(kept, text, rules), text };
@@ -1637,15 +1754,22 @@ export class Bridge {
       }
     }
     const pick = state.models?.[who];
-    const made = await opencode.newSession({
-      title: `Chips space ${spaceId}`,
-      agent: agent.config.agent,
-      model: pick === undefined ? agent.model : refOf(pick),
-      directory: await this.folderFor({ who, agent }),
-      metadata: { chips_space: spaceId, chips_agent: who },
+    const directory = await this.folderFor({ who, agent });
+    // Made in the mode in force (Chips ADR 0300), and kept before the mode can change again.
+    const made = await this.oneAtATime(async () => {
+      const rules = modeRules(this.modeWanted);
+      const made = await opencode.newSession({
+        title: `Chips space ${spaceId}`,
+        agent: agent.config.agent,
+        model: pick === undefined ? agent.model : refOf(pick),
+        directory,
+        metadata: { chips_space: spaceId, chips_agent: who, ...(rules.length === 0 ? {} : { [CHIPS_RULES]: rules }) },
+        ...(rules.length === 0 ? {} : { permissions: rules }),
+      });
+      state.sessions[id] = made;
+      saveState(state);
+      return made;
     });
-    state.sessions[id] = made;
-    saveState(state);
     if (!(await this.running(run))) return undefined;
     const text = said(made);
     return { sessionId: made, given: await this.prompted(made, text, rules), text };

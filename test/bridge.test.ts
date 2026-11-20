@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
 import { type Chips, connect, type Decision } from "@chipschat/harness";
-import { createIdGenerator, messageIdOf } from "@chipschat/protocol";
+import { createIdGenerator, messageIdOf, ownRules } from "@chipschat/protocol";
 import {
   Bridge,
   type BridgeState,
@@ -65,19 +65,27 @@ async function rig(
     gatherMs?: number;
     /** The bridge runs OpenCode's server, and this restarts it: its connection hears restarts, as `main.ts`'s does. */
     restartServer?: (opencode: FakeOpenCode) => Promise<void>;
+    /** The OpenCode a bridge before this one spoke to, sessions and all. */
+    opencode?: FakeOpenCode;
+    /** Each copy of what it runs on its own the bridge sends, kept here: the kit's server takes none. */
+    ownRules?: unknown[];
   } = {},
 ): Promise<Rig> {
   const restarts = options.restartServer !== undefined;
   const chips = options.chips ?? (await startFakeChips({ capabilities: restarts ? ["agents", "restarts"] : ["agents"] }));
   if (options.chips === undefined) open.push(() => chips.close());
-  const opencode = await startFakeOpenCode(options.folder === undefined ? {} : { directory: options.folder });
-  open.push(() => opencode.close());
+  const opencode = options.opencode ?? (await startFakeOpenCode(options.folder === undefined ? {} : { directory: options.folder }));
+  if (options.opencode === undefined) open.push(() => opencode.close());
   let made: Bridge | undefined;
   const client = await connect({
     url: chips.address.url,
     token: chips.address.token,
     ...(restarts ? { onRestart: () => made?.restart() } : {}),
   });
+  const copies = options.ownRules;
+  if (copies !== undefined) {
+    (client.settings as { ownRules: (copy: unknown) => Promise<unknown> }).ownRules = async (copy) => copies.push(copy);
+  }
   const state = options.state ?? { sessions: {} };
   const lines: string[] = [];
   const bridge = new Bridge({
@@ -609,6 +617,152 @@ describe("a model call its output limit cut off (Chips, 17 November 2026)", () =
     await sleep(50);
     assert.equal(postsOf(chips, started.run_id).length, 0, "no answer: \"I'll start by reading the plan.\" was no answer");
     assert.equal(count(chips, "run.completed"), 0);
+  });
+});
+
+describe("the mode a person picks in Chips (Chips ADR 0300, 19 November addenda)", () => {
+  const EDIT_ASK = { action: "edit", resource: "*", effect: "ask" };
+  const EDIT_DENY = { action: "edit", resource: "*", effect: "deny" };
+  const SHELL_ASK = { action: "shell", resource: "*", effect: "ask" };
+  /** What OpenCode's browser plugin adds to a session while a browser is attached. */
+  const BROWSER = { action: "browser", resource: "*", effect: "allow" };
+  /** A person's pick, as the app sends it, or `null` to put it back. */
+  const pick = (chips: FakeChips, mode: Record<string, unknown> | null) =>
+    chips.asOwner({
+      type: "policy.updated",
+      harness_id: chips.address.harnessId,
+      policy: { autonomy: 1, rules: [], mode },
+    });
+  const last = (copies: unknown[]) =>
+    copies.at(-1) as { modes?: { base: string; running?: string; offers: { id: string }[] }; note?: string } | undefined;
+  const same = (one: unknown, other: unknown) => JSON.stringify(one) === JSON.stringify(other);
+
+  it("puts each room's session in the mode picked, takes off only its own rules, and says what it runs in", async () => {
+    const copies: unknown[] = [];
+    const { chips, opencode, lines } = await rig({ ownRules: copies });
+    await chips.say("Hello");
+    await sent(chips, "run.completed");
+    const session = opencode.created[0]?.id ?? "";
+    assert.equal(opencode.created[0]?.permissions, undefined, "Default adds no rules");
+    assert.deepEqual([last(copies)?.modes?.base, last(copies)?.modes?.running], ["default", "default"]);
+    assert.deepEqual(last(copies)?.modes?.offers.map((mode) => mode.id), ["default", "ask-changes", "read-only"]);
+    assert.ok(copies.every((copy) => ownRules.safeParse(copy).success), "every copy as Chips takes it");
+    // OpenCode's browser plugin adds a rule of its own meanwhile.
+    opencode.write(session, { permissions: [BROWSER] });
+
+    await pick(chips, { id: "read-only", name: "Read-only" });
+    await until(() => same(opencode.rulesOf(session), [BROWSER, EDIT_DENY, SHELL_ASK]));
+    await until(() => last(copies)?.modes?.running === "read-only");
+    assert.match(last(copies)?.note ?? "", /In Read-only, its sessions also have rules from Chips/);
+    await until(() => lines.includes("OpenCode's sessions in Read-only (1 of 1 changed)"));
+
+    await pick(chips, { id: "ask-changes", name: "Ask before changes" });
+    await until(() => same(opencode.rulesOf(session), [BROWSER, EDIT_ASK, SHELL_ASK]));
+    await until(() => last(copies)?.modes?.running === "ask-changes");
+
+    await pick(chips, null);
+    await until(() => same(opencode.rulesOf(session), [BROWSER]));
+    await until(() => last(copies)?.modes?.running === "default");
+    const metadata = (await new OpenCodeClient({ url: opencode.url, password: opencode.password }).session(session))["metadata"];
+    assert.deepEqual(metadata, { chips_space: chips.address.spaceId, chips_agent: keyOf(AGENT) });
+    await until(() => lines.includes("OpenCode's sessions back in Default (1 of 1 changed)"));
+    assert.equal(lines.filter((line) => line.startsWith("OpenCode's sessions")).length, 3, "one line for each change");
+  });
+
+  it("moves a session while its turn runs, so its next tool call is checked by the new rules", async () => {
+    const { chips, opencode } = await rig();
+    await chips.say("a long one");
+    await sent(chips, "run.started");
+    await until(() => opencode.created.length === 1);
+    await pick(chips, { id: "read-only" });
+    await until(() => same(opencode.rulesOf(opencode.created[0]?.id ?? ""), [EDIT_DENY, SHELL_ASK]));
+    assert.ok(!chips.workspace.log.some((event) => event.type === "run.completed"), "while the turn still ran");
+    await sent(chips, "run.completed");
+  });
+
+  it("says when it couldn't reach a session, and puts it in the mode before its next turn", async () => {
+    const copies: unknown[] = [];
+    const { chips, opencode, lines } = await rig({ ownRules: copies });
+    await chips.say("one");
+    await sent(chips, "run.completed");
+    const session = opencode.created[0]?.id ?? "";
+    opencode.up = false;
+    await pick(chips, { id: "ask-changes" });
+    await until(() => lines.some((line) => line.startsWith("1 of 1 of OpenCode's sessions go into Ask before changes before their next turn instead")));
+    assert.equal(opencode.rulesOf(session), undefined);
+    opencode.up = true;
+    await chips.say("two");
+    await until(() => opencode.prompts.length === 2);
+    assert.ok(same(opencode.rulesOf(session), [EDIT_ASK, SHELL_ASK]), "in it before its words");
+    await until(() => last(copies)?.modes?.running === "ask-changes");
+  });
+
+  it("opens a new session in the pick, and puts it back in Default when its time is up", async () => {
+    const { chips, opencode } = await rig();
+    await pick(chips, { id: "ask-changes", until: new Date(Date.now() + 800).toISOString() });
+    await sleep(50);
+    await chips.say("Hello");
+    await sent(chips, "run.completed");
+    const made = opencode.created[0];
+    assert.deepEqual(made?.permissions, [EDIT_ASK, SHELL_ASK]);
+    assert.deepEqual((made?.metadata as Record<string, unknown>)["chips_rules"], [EDIT_ASK, SHELL_ASK]);
+    await until(() => same(opencode.rulesOf(made?.id ?? ""), []), 4000);
+  });
+
+  it("leaves its sessions in Default for a pick that isn't one of its modes, and says why", async () => {
+    const { chips, opencode, lines } = await rig();
+    await chips.say("Hello");
+    await sent(chips, "run.completed");
+    await pick(chips, { id: "bypassPermissions", everything: true });
+    await until(() => lines.some((line) => line.includes("bypassPermissions, picked in Chips, isn't one of its modes")));
+    assert.equal(opencode.rulesOf(opencode.created[0]?.id ?? ""), undefined);
+    assert.ok(!opencode.updates.some((update) => "permissions" in update), "nothing written");
+  });
+
+  it("moves a sub-agent's session too, which OpenCode made with its parent's rules", async () => {
+    const { chips, opencode } = await rig();
+    await pick(chips, { id: "read-only" });
+    await chips.say("delegate the quotes");
+    await sent(chips, "run.completed");
+    const parent = opencode.created[0]?.id ?? "";
+    // No room's: OpenCode made it for the sub-agent, and the bridge heard of it.
+    const child = opencode.children[0] ?? "";
+    assert.ok(same(opencode.rulesOf(parent), [EDIT_DENY, SHELL_ASK]));
+    assert.ok(same(opencode.rulesOf(child), [EDIT_DENY, SHELL_ASK]));
+    await pick(chips, null);
+    await until(() => same(opencode.rulesOf(parent), []) && same(opencode.rulesOf(child), []));
+  });
+
+  it("puts a session back in the mode before its turn where something else wrote over its rules", async () => {
+    const { chips, opencode, lines } = await rig();
+    await pick(chips, { id: "read-only" });
+    await chips.say("one");
+    await sent(chips, "run.completed");
+    const session = opencode.created[0]?.id ?? "";
+    opencode.write(session, { permissions: [] });
+    await chips.say("two");
+    await until(() => opencode.prompts.length === 2);
+    assert.ok(same(opencode.rulesOf(session), [EDIT_DENY, SHELL_ASK]), "in Read-only before its words");
+    assert.ok(lines.includes(`${session} put in Read-only`), lines.join("\n"));
+  });
+
+  it("starts its sessions in Default when the pick ended while it was off", async () => {
+    const chips = await startFakeChips({ capabilities: ["agents"] });
+    open.push(() => chips.close());
+    const opencode = await startFakeOpenCode();
+    open.push(() => opencode.close());
+    const first = await rig({ chips, opencode });
+    await pick(chips, { id: "read-only" });
+    await chips.say("Hello");
+    await sent(chips, "run.completed");
+    const session = opencode.created[0]?.id ?? "";
+    assert.ok(same(opencode.rulesOf(session), [EDIT_DENY, SHELL_ASK]));
+    first.bridge.stop();
+    first.client.close();
+    await pick(chips, null);
+    const again = await rig({ chips, opencode, state: first.state });
+    assert.ok(same(opencode.rulesOf(session), []), "back in Default before it hears anything");
+    assert.ok(again.lines.includes("OpenCode's sessions back in Default (1 of 1 changed)"), again.lines.join("\n"));
   });
 });
 
