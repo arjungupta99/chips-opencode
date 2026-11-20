@@ -115,10 +115,10 @@ export const modesCopy = (running: string): OwnModes => ({ base: BASE, running, 
  */
 export function modeNote(running: string): string | undefined {
   if (running === "ask-changes") {
-    return "In Ask before changes, its sessions also have rules from Chips, read after these: edits and commands ask.";
+    return "In Ask before changes, Chips's rules come after these: edits and commands ask, apart from any it was told Always for.";
   }
   if (running === "read-only") {
-    return "In Read-only, its sessions also have rules from Chips, read after these: edits are refused and commands ask.";
+    return "In Read-only, Chips's rules come after these: edits are refused and commands ask.";
   }
   return undefined;
 }

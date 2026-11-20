@@ -158,8 +158,8 @@ describe("OpenCode's copy", () => {
       assert.equal(copy.mode, undefined, "no mode the page reads as asking for whatever isn't listed");
     }
     assert.equal(opencodeOwnRules([], HOME, "default").note, NOTE);
-    assert.equal(opencodeOwnRules([], HOME, "ask-changes").note, `${NOTE} In Ask before changes, its sessions also have rules from Chips, read after these: edits and commands ask.`);
-    assert.equal(opencodeOwnRules([], HOME, "read-only").note, `${NOTE} In Read-only, its sessions also have rules from Chips, read after these: edits are refused and commands ask.`);
+    assert.equal(opencodeOwnRules([], HOME, "ask-changes").note, `${NOTE} In Ask before changes, Chips's rules come after these: edits and commands ask, apart from any it was told Always for.`);
+    assert.equal(opencodeOwnRules([], HOME, "read-only").note, `${NOTE} In Read-only, Chips's rules come after these: edits are refused and commands ask.`);
   });
 
   it("says it runs everything when its config allows everything, and nothing when it says nothing", () => {

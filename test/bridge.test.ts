@@ -653,7 +653,7 @@ describe("the mode a person picks in Chips (Chips ADR 0300, 19 November addenda)
     await pick(chips, { id: "read-only", name: "Read-only" });
     await until(() => same(opencode.rulesOf(session), [BROWSER, EDIT_DENY, SHELL_ASK]));
     await until(() => last(copies)?.modes?.running === "read-only");
-    assert.match(last(copies)?.note ?? "", /In Read-only, its sessions also have rules from Chips/);
+    assert.match(last(copies)?.note ?? "", /In Read-only, Chips's rules come after these/);
     await until(() => lines.includes("OpenCode's sessions in Read-only (1 of 1 changed)"));
 
     await pick(chips, { id: "ask-changes", name: "Ask before changes" });
