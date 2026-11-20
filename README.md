@@ -60,8 +60,9 @@ Apache-2.0, published on npm as `@chipschat/opencode`.
 | Trouble on the harness | `GET /api/info` every 30 s |
 | Restart (Chips ADR 0094) | the bridge's own `opencode serve` stopped and started again on the same port and password; then `GET /api/info`: fine, or why it isn't back |
 
-OpenCode asks before anything its config and the agent don't allow (its rules fall back to "ask"),
-so its permission asks reach Chips as cards. While the harness's Chips's rules are on, an Always
+OpenCode asks for what its config and the agent's own rules make ask; nothing matching asks too,
+but its `build` agent allows everything out of the box (2.0.25), so with no settings of your own
+little asks. Its permission asks reach Chips as cards. While the harness's Chips's rules are on, an Always
 there is kept by Chips alone: OpenCode is told `once`, so the next ask comes back to Chips, whose
 rule answers it, and switching that rule off brings the cards back. With Chips's rules off,
 OpenCode saves the `always` itself.
@@ -70,6 +71,15 @@ The bridge tells Chips what that config lets through (Chips ADR 0299), for the h
 Permissions page: `permission` from each config document OpenCode's server read
 (`GET /api/config`), the person's and the project's, at start and after a restart. It reads them
 and never writes them. Needs Chips SDK 1.0.10; on an older one nothing is sent.
+
+A person can pick another mode for a while on OpenCode's settings page in Chips (Chips ADR 0300).
+OpenCode has rules, not modes, so these are Chips's, made of OpenCode's rules: Default adds none,
+Ask before changes adds `ask` for `edit` and `shell`, and Read-only `deny` for `edit` and `ask` for
+`shell`. The bridge sets them on the sessions it opens (`permissions` on `POST /api/session` and
+`PATCH /api/session/{id}`), after the session's other rules so they decide, and names them in the
+session's metadata (`chips_rules`) so only those come off when the time is up. Your config isn't
+touched. OpenCode reads them at the session's next tool call. An Always OpenCode already saved
+still runs in Ask before changes. Needs Chips SDK 1.0.11; on an older one nothing changes.
 
 When the event stream drops, OpenCode doesn't replay what was missed. When it's back, the bridge
 reads each turn's session: which words were taken, whether it is still working, and how its last
